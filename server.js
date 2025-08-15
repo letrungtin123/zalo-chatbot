@@ -10,10 +10,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-app.use(bodyParser.json());
 
-// --- Serve folder /verify ---
-app.use("/verify", express.static(path.join(__dirname, "verify")));
+// Serve toàn bộ file trong /verify
+app.use('/verify', express.static(path.join(__dirname, 'verify')));
 
 // --- Webhook nhận message ---
 app.post("/webhook", async (req, res) => {
