@@ -10,7 +10,6 @@ const genAI = new GoogleGenerativeAI(API_KEY);
 const model = genAI.getGenerativeModel({ model: MODEL_NAME });
 
 export async function generateReply(history, userText) {
-  // history: [{role:'user'|'assistant', content:'...'}]
   const sys = 'Bạn là trợ lý thân thiện, trả lời ngắn gọn, tiếng Việt, lịch sự.';
   const parts = [
     { text: sys },
