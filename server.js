@@ -13,7 +13,16 @@ const app = express();
 app.use(bodyParser.json());
 
 // --- Serve folder /verify cho Zalo HTML verification ---
-app.use('/verify', express.static(path.join(__dirname, 'verify')));
+app.get('/verify/:file', (req, res) => {
+  const fileName = req.params.file;
+  const filePath = path.join(__dirname, 'verify', fileName);
+  res.sendFile(filePath, err => {
+    if (err) {
+      console.error('Verify file error:', err);
+      res.status(404).send('File not found');
+    }
+  });
+});
 
 // --- Webhook nhận message từ OA ---
 app.post('/webhook', async (req, res) => {
