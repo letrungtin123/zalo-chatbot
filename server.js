@@ -7,6 +7,8 @@ import { sendText } from './zaloApi.js';
 import { generateReply } from './gemini.js';
 
 const app = express();
+// Serve folder public
+app.use(express.static(path.join(process.cwd(), 'public')));
 app.use(bodyParser.json());
 
 // (Tuỳ chọn) verify chữ ký webhook nếu Zalo gửi header x-zalo-signature
