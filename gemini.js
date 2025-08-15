@@ -10,13 +10,20 @@ const genAI = new GoogleGenerativeAI(API_KEY);
 const model = genAI.getGenerativeModel({ model: MODEL_NAME });
 
 export async function generateReply(history, userText) {
+  // history: [{role:'user'|'assistant', content:'...'}]
   const sys = 'Bạn là trợ lý thân thiện, trả lời ngắn gọn, tiếng Việt, lịch sự.';
-  const parts = [
-    { text: sys },
-    ...history.map(m => ({ text: `${m.role.toUpperCase()}: ${m.content}` })),
-    { text: `USER: ${userText}` }
-  ];
-  const res = await model.generateContent({ contents: [{ role: 'user', parts }] });
-  const out = res?.response?.text() || 'Xin lỗi, mình đang bị quá tải.';
-  return out.trim();
+  const conversation = [
+    sys,
+    ...history.map(m => `${m.role.toUpperCase()}: ${m.content}`),
+    `USER: ${userText}`
+  ].join('\n\n');
+
+  try {
+    const res = await model.generateContent(conversation);
+    const out = res?.response?.text() || 'Xin lỗi, mình đang bị quá tải.';
+    return out.trim();
+  } catch (e) {
+    console.error('Gemini error:', e);
+    return 'Xin lỗi, có lỗi xảy ra khi tạo câu trả lời.';
+  }
 }

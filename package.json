@@ -1,20 +1,21 @@
 {
-  "name": "zalo-gemini-bot",
+  "name": "zalo-chatbot-fixed",
   "version": "1.0.0",
   "type": "module",
   "main": "server.js",
   "scripts": {
+    "start": "node server.js",
     "dev": "node server.js",
     "exchange:code": "node zaloOAuth.js --exchange",
-    "refresh": "node zaloOAuth.js --refresh"
+    "refresh:token": "node zaloOAuth.js --refresh"
   },
   "dependencies": {
-    "@google/generative-ai": "0.17.0",
-    "axios": "1.7.2",
-    "body-parser": "1.20.2",
-    "crypto-js": "4.2.0",
-    "dotenv": "16.4.5",
-    "express": "4.19.2",
-    "fs-extra": "11.2.0"
+    "@google/generative-ai": "^0.21.0",
+    "axios": "^1.7.2",
+    "body-parser": "^1.20.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "fs-extra": "^11.2.0"
   }
 }
+
