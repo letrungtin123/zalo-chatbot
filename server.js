@@ -3,6 +3,7 @@ import bodyParser from 'body-parser';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import 'dotenv/config';
+import fs from 'fs';
 import { sendText } from './zaloApi.js';
 import { generateReply } from './gemini.js';
 import { ensureAccessToken } from './zaloOAuth.js';
@@ -12,11 +13,26 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(bodyParser.json());
 
-// --- Serve static at root (Zalo cần truy cập trực tiếp /zalo_verifierXXXX.html) ---
+// --- Serve static at ROOT (Zalo cần truy cập trực tiếp /<verifier>.html) ---
 const publicDir = path.join(__dirname, 'public');
-app.use(express.static(publicDir));
-// Tùy chọn: vẫn map thêm /verify tới cùng thư mục
-app.use('/verify', express.static(publicDir));
+app.use(express.static(publicDir));         // https://host/<file>
+app.use('/verify', express.static(publicDir)); // tùy chọn
+
+// Tạo route rõ ràng cho file xác thực theo ENV (để “chắc ăn”)
+const VERIFY_FILENAME = process.env.ZALO_VERIFY_FILENAME || '';
+const VERIFY_CONTENT = process.env.ZALO_VERIFY_CONTENT || '';
+if (VERIFY_FILENAME) {
+  const verifyPath = '/' + VERIFY_FILENAME.replace(/^\//, '');
+  app.get(verifyPath, (req, res) => {
+    if (VERIFY_CONTENT) {
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      return res.status(200).send(VERIFY_CONTENT); // trả đúng chuỗi nếu cần
+    }
+    const fileOnDisk = path.join(publicDir, VERIFY_FILENAME);
+    if (fs.existsSync(fileOnDisk)) return res.sendFile(fileOnDisk);
+    return res.status(404).send('Verifier file not found on server.');
+  });
+}
 
 // Healthcheck
 app.get('/health', (_req, res) => res.status(200).send('OK'));
@@ -39,7 +55,7 @@ app.post('/webhook', async (req, res) => {
 
     if (!userId || !text) return res.status(200).send('ignored');
 
-    const history = []; // TODO: lưu/đọc lịch sử thật nếu cần
+    const history = []; // TODO: lưu/đọc lịch sử nếu cần
     const reply = await generateReply(history, text);
     const accessToken = await ensureAccessToken();
     await sendText(accessToken, userId, reply);
