@@ -3,28 +3,31 @@ import "dotenv/config";
 import express from "express";
 import bodyParser from "body-parser";
 import path from "path";
-import fs from "fs";
 import { fileURLToPath } from "url";
+import fs from "fs";
 
 import { sendText } from "./zaloApi.js";
 import { generateReply } from "./gemini.js";
-import * as oauth from "./zaloOAuth.js"; // dùng namespace để tránh lỗi export/case
+import * as oauth from "./zaloOAuth.js"; // alias rõ ràng
 
-// ----------------- Setup -----------------
+// ----- Setup paths -----
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// ----- App -----
 const app = express();
 app.set("trust proxy", true);
 app.use(bodyParser.json({ limit: "1mb" }));
 
-// ----------------- Static & Verify file -----------------
+// ----- Public (file verify html nếu cần) -----
 const publicDir = path.join(__dirname, "public");
-app.use(express.static(publicDir)); // GET https://host/<file>
-app.use("/verify", express.static(publicDir)); // tuỳ chọn: GET /verify/<file>
+if (fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));
+}
 
-const VERIFY_FILENAME = process.env.ZALO_VERIFY_FILENAME || "";
-const VERIFY_CONTENT = process.env.ZALO_VERIFY_CONTENT || "";
+// Nếu dùng ENV để phục vụ file verify
+const VERIFY_FILENAME = (process.env.ZALO_VERIFY_FILENAME || "").trim();
+const VERIFY_CONTENT = (process.env.ZALO_VERIFY_CONTENT || "").trim();
 if (VERIFY_FILENAME) {
   const verifyPath = "/" + VERIFY_FILENAME.replace(/^\//, "");
   app.get(verifyPath, (_req, res) => {
@@ -32,110 +35,91 @@ if (VERIFY_FILENAME) {
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       return res.status(200).send(VERIFY_CONTENT);
     }
-    const fileOnDisk = path.join(publicDir, VERIFY_FILENAME);
-    if (fs.existsSync(fileOnDisk)) return res.sendFile(fileOnDisk);
-    return res.status(404).send("Verifier file not found on server.");
+    const onDisk = path.join(publicDir, VERIFY_FILENAME);
+    if (fs.existsSync(onDisk)) return res.sendFile(onDisk);
+    return res.status(404).send("Verifier file not found");
   });
 }
 
-// ----------------- Health & Root (Render cần 200) -----------------
-app.get("/", (_req, res) => res.status(200).send("OK root"));
+// Health
 app.get("/health", (_req, res) => res.status(200).send("OK"));
 
-// ----------------- Webhook verify (GET) -----------------
+// Debug: nhìn nhanh key đã nạp chưa (log 6 ký tự đầu, đừng để lâu)
+console.log(
+  "GOOGLE_API_KEY loaded:",
+  ((process.env.GOOGLE_API_KEY || "").trim().slice(0, 6) || "EMPTY") + "..."
+);
+
+// Debug: ping gemini
+app.get("/debug/gemini", async (_req, res) => {
+  try {
+    const out = await generateReply([], 'nói chữ "pong"');
+    res.json({ ok: true, out });
+  } catch (e) {
+    res.status(500).json({ ok: false, err: String(e) });
+  }
+});
+
+// Webhook verify GET (optional)
 app.get("/webhook", (req, res) => {
-  if (req.query?.verify_token === process.env.VERIFY_TOKEN)
-    return res.send("verified");
-  if (req.query?.challenge) return res.send(req.query.challenge);
-  res.send("ok");
+  const token = (process.env.VERIFY_TOKEN || "").trim();
+  if (token && req.query?.verify_token === token) return res.send("verified");
+  if (req.query?.challenge) return res.send(String(req.query.challenge));
+  return res.send("ok");
 });
 
-// ----------------- Webhook nhận tin (POST) -----------------
-app.post("/webhook", (req, res) => {
-  // ACK ngay để Zalo không timeout
-  res.status(200).send("ok");
+// Webhook POST
+app.post("/webhook", async (req, res) => {
+  try {
+    const raw = req.body || {};
+    // Chuẩn hóa (Zalo push có dạng sender.id / message.text)
+    const userId =
+      raw?.sender?.user_id ||
+      raw?.sender?.id ||
+      raw?.user?.user_id ||
+      raw?.recipient?.user_id ||
+      null;
 
-  // Xử lý nền
-  (async () => {
-    try {
-      const event = req.body || {};
+    const text =
+      raw?.message?.text || raw?.message?.content?.text || raw?.text || null;
 
-      // userId: hỗ trợ cả id & user_id ở nhiều nhánh (log Zalo trả sender.id)
-      const userId =
-        event?.sender?.user_id ||
-        event?.sender?.id ||
-        event?.user?.user_id ||
-        event?.user?.id ||
-        event?.recipient?.user_id ||
-        event?.recipient?.id ||
-        null;
+    console.log("[WEBHOOK] incoming:", JSON.stringify({ userId, text, raw }));
 
-      const text =
-        event?.message?.text ||
-        event?.message?.content?.text ||
-        event?.text ||
-        null;
-
-      console.log(
-        "[WEBHOOK] incoming:",
-        JSON.stringify({ userId, text, raw: event })
-      );
-
-      if (!userId || !text) {
-        console.log("[WEBHOOK] ignored (missing userId/text)");
-        return;
-      }
-
-      // Tạo reply bằng Gemini (có fallback nếu lỗi key)
-      let reply = "Xin chào!";
-      try {
-        const history = [];
-        const gen = await generateReply(history, text);
-        if (gen && typeof gen === "string") reply = gen;
-      } catch (e) {
-        console.error("[WEBHOOK] generateReply error:", e?.message || e);
-        reply = "Mình đang bận chút, mình sẽ trả lời ngắn gọn: " + text;
-      }
-
-      // Lấy access token (v4: header secret_key, form-urlencoded)
-      const accessToken = await oauth.ensureAccessToken();
-
-      // Gửi trả lời về Zalo
-      const sendResp = await sendText(accessToken, userId, reply);
-      console.log("[WEBHOOK] sendText resp:", sendResp);
-    } catch (e) {
-      console.error("[WEBHOOK] error:", e?.response?.data || e.message || e);
+    if (!userId || !text) {
+      console.log("[WEBHOOK] ignored: missing userId/text");
+      return res.status(200).send("ignored");
     }
-  })();
+
+    // Gọi Gemini
+    const history = []; // nếu cần bạn lưu lịch sử
+    const reply = await generateReply(history, text || "");
+
+    // Lấy access_token từ tokens.json (đã exchange trước đó)
+    const accessToken = await oauth.ensureAccessToken();
+
+    // Gửi trả lời cho user
+    const sendResp = await sendText(accessToken, userId, reply);
+
+    // Nếu OA chưa nâng gói
+    if (sendResp?.error === -224) {
+      console.warn(
+        "[WEBHOOK] OA tier restriction (-224). Không thể gửi tin nhắn. Xem thêm giá: https://zalo.cloud/oa/pricing"
+      );
+    } else if (sendResp?.error) {
+      console.warn("[WEBHOOK] sendText error:", sendResp);
+    } else {
+      console.log("[WEBHOOK] sendText ok:", sendResp);
+    }
+
+    return res.status(200).send("ok");
+  } catch (e) {
+    console.error("[WEBHOOK] error:", e);
+    return res.status(500).send("error");
+  }
 });
 
-// ----------------- OAuth callback (để copy code) -----------------
-app.get("/oauth/callback", (req, res) => {
-  const code = req.query.code || "";
-  res.setHeader("Content-Type", "text/html; charset=utf-8");
-  res.send(`<h3>OAuth callback</h3><p>Code: ${code}</p>`);
-});
-
-// ----------------- 404 fallback -----------------
-app.use((req, res) => res.status(404).send("Not Found"));
-
-// ----------------- Start -----------------
+// Start
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`✅ Server listening on port ${port}`);
-  console.log(
-    "ENV check:",
-    "GOOGLE_API_KEY=",
-    (process.env.GOOGLE_API_KEY || "").slice(0, 5),
-    "ZALO_APP_ID=",
-    process.env.ZALO_APP_ID
-  );
-});
-
-// ----------------- Safety logs -----------------
-process.on("unhandledRejection", (err) => {
-  console.error("[unhandledRejection]", err);
-});
-process.on("uncaughtException", (err) => {
-  console.error("[uncaughtException]", err);
 });

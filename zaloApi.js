@@ -1,27 +1,38 @@
 // zaloApi.js
 import axios from "axios";
+
 const API_BASE = process.env.ZALO_API_BASE || "https://openapi.zalo.me";
 
+/**
+ * Gửi tin nhắn text tới user
+ * @param {string} accessToken - OA access token
+ * @param {string} userId      - Zalo user id (sender.id)
+ * @param {string} text        - message
+ */
 export async function sendText(accessToken, userId, text) {
   const url = `${API_BASE}/v2.0/oa/message`;
+
   const payload = {
     recipient: { user_id: userId },
-    message: { text },
+    message: { text: String(text || "").slice(0, 2000) },
   };
 
-  const { data } = await axios.post(url, payload, {
-    headers: {
-      "Content-Type": "application/json",
-      // Zalo chấp nhận 1 trong 2 cách dưới đây. Dùng cái đầu tiên trước:
-      access_token: accessToken,
-      // Nếu vẫn báo lỗi, thử chuyển sang:
-      // 'Authorization': `Bearer ${accessToken}`,
-    },
-    timeout: 15000,
-  });
+  try {
+    const { data } = await axios.post(url, payload, {
+      headers: {
+        "Content-Type": "application/json",
+        // QUAN TRỌNG: access token trong HEADER, không để query
+        Authorization: `Bearer ${accessToken}`,
+      },
+      timeout: 10000,
+    });
 
-  if (data?.error && data.error !== 0) {
-    console.error("Zalo send error:", data);
+    if (data?.error || data?.message === "error") {
+      console.error("Zalo send error:", data);
+    }
+    return data;
+  } catch (e) {
+    console.error("Zalo send exception:", e?.response?.data || e.message);
+    return { error: -1, message: "exception" };
   }
-  return data;
 }
