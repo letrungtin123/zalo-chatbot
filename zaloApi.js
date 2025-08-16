@@ -1,22 +1,27 @@
 // zaloApi.js
 import axios from "axios";
+
 const API_BASE = process.env.ZALO_API_BASE || "https://openapi.zalo.me";
 
-// Gửi text qua Message V3 (CS: trong khung 24h)
+// V3 CS API: https://go.zalo.me/api-v3
 export async function sendText(accessToken, userId, text) {
   const url = `${API_BASE}/v3.0/oa/message/cs`;
   const payload = {
-    recipient: { user_id: userId },
-    message: { text }
+    recipient: { user_id: String(userId) },
+    message: { text: String(text) },
   };
+
   const { data } = await axios.post(url, payload, {
     headers: {
+      "access_token": accessToken,        // V3 yêu cầu token ở HEADER
       "Content-Type": "application/json",
       "Accept": "application/json",
-      "access_token": accessToken
     },
-    timeout: 10000
+    timeout: 10000,
   });
-  if (data?.error) console.error("Zalo send error:", data);
+
+  if (data?.error && data?.error !== 0) {
+    console.error("Zalo send error:", data);
+  }
   return data;
 }
