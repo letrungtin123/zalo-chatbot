@@ -19,13 +19,11 @@ export async function sendText(accessToken, userId, text) {
 
   try {
     const { data } = await axios.post(url, payload, {
-      headers: {
-        "Content-Type": "application/json",
-        // QUAN TRỌNG: access token trong HEADER, không để query
-        Authorization: `Bearer ${accessToken}`,
-      },
-      timeout: 10000,
-    });
+        headers: {
+          'Content-Type': 'application/json',
+          access_token: accessToken,   // v2 yêu cầu token ở header, KHÔNG để ở query
+        }
+      });
 
     if (data?.error || data?.message === "error") {
       console.error("Zalo send error:", data);
