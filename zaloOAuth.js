@@ -7,7 +7,7 @@ import path from "path";
 
 const OAUTH_BASE = process.env.ZALO_OAUTH_BASE || "https://oauth.zaloapp.com";
 const APP_ID = process.env.ZALO_APP_ID;
-const APP_SECRET = process.env.ZALO_APP_SECRET; // sẽ đi trong header: secret_key
+const APP_SECRET = process.env.ZALO_APP_SECRET; // đi ở header: secret_key
 const REDIRECT_URI = process.env.ZALO_REDIRECT_URI;
 
 if (!APP_ID || !APP_SECRET) {
@@ -29,11 +29,10 @@ async function exchangeCode(code) {
     },
   });
 
-  if (!data?.access_token) {
+  if (!data?.access_token)
     throw new Error(`Exchange failed: ${JSON.stringify(data)}`);
-  }
 
-  const expiresAt = Date.now() + (Number(data.expires_in) || 3600) * 1000;
+  const expiresAt = Date.now() + Number(data.expires_in || 3600) * 1000;
   const tokens = {
     access_token: data.access_token,
     refresh_token: data.refresh_token,
@@ -45,13 +44,13 @@ async function exchangeCode(code) {
 
 async function refreshToken() {
   const url = `${OAUTH_BASE}/v4/oa/access_token`;
-  const tokens = await loadTokens();
-  if (!tokens?.refresh_token) throw new Error("No refresh_token stored");
+  const stored = await loadTokens();
+  if (!stored?.refresh_token) throw new Error("No refresh_token stored");
 
   const form = new URLSearchParams();
   form.append("app_id", String(APP_ID));
   form.append("grant_type", "refresh_token");
-  form.append("refresh_token", tokens.refresh_token);
+  form.append("refresh_token", stored.refresh_token);
 
   const { data } = await axios.post(url, form.toString(), {
     headers: {
@@ -60,14 +59,13 @@ async function refreshToken() {
     },
   });
 
-  if (!data?.access_token) {
+  if (!data?.access_token)
     throw new Error(`Refresh failed: ${JSON.stringify(data)}`);
-  }
 
-  const expiresAt = Date.now() + (Number(data.expires_in) || 3600) * 1000;
+  const expiresAt = Date.now() + Number(data.expires_in || 3600) * 1000;
   const newTokens = {
     access_token: data.access_token,
-    refresh_token: data.refresh_token || tokens.refresh_token,
+    refresh_token: data.refresh_token || stored.refresh_token,
     expires_at: expiresAt,
   };
   await saveTokens(newTokens);
@@ -88,7 +86,7 @@ export async function ensureAccessToken() {
   return tokens.access_token;
 }
 
-// --- CLI mode ---
+// --- CLI ---
 const __filename = fileURLToPath(import.meta.url);
 const isDirect =
   process.argv[1] && path.resolve(process.argv[1]) === path.resolve(__filename);
