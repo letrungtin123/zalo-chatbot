@@ -1,0 +1,37 @@
+{
+    "name": "Công ty Cổ phần JW KIM",
+    "legal_name": "Công ty Cổ phần JW KIM",
+    "hotline": "+84 937 117 555",
+    "phone": "+84 937 117 555",
+    "email": "kimjaewoongshop@gmail.com",
+    "address": "Tầng 05 Tòa nhà Hoa Lâm, số 02 Thi Sách, Phường Bến Nghé, Quận 1, Thành phố Hồ Chí Minh, Việt Nam.",
+    "hours": "Thứ 2–Thứ 6: 08:00–17:30; Thứ 7: 08:00–12:00 (GMT+7)",
+    "services": [
+      "Công ty chuyên về lĩnh vực phần mềm",
+      "Bảo trì – hỗ trợ kỹ thuật",
+      "Đào tạo & chuyển giao"
+    ],
+    "faqs": [
+      {
+        "q": ["tên công ty", "tên doanh nghiệp", "bên bạn tên gì"],
+        "a": "Tên công ty: Công ty Cổ phần JW KIM."
+      },
+      {
+        "q": ["địa chỉ", "ở đâu", "văn phòng"],
+        "a": "Địa chỉ: Tầng 05 Tòa nhà Hoa Lâm, số 02 Thi Sách, Phường Bến Nghé, Quận 1, Thành phố Hồ Chí Minh, Việt Nam."
+      },
+      {
+        "q": ["giờ làm", "thời gian làm việc", "mở cửa"],
+        "a": "Giờ làm việc: Thứ 2–Thứ 6 08:00–17:30; Thứ 7 08:00–12:00."
+      },
+      {
+        "q": ["liên hệ", "hotline", "số điện thoại"],
+        "a": "Hotline: +84 937 117 555 — Email: kimjaewoongshop@gmail.com"
+      },
+      {
+        "q": ["dịch vụ", "cung cấp gì"],
+        "a": "Bên mình cung cấp: Tư vấn & triển khai giải pháp về lĩnh vực phần mềm, Bảo trì – hỗ trợ kỹ thuật, Đào tạo & chuyển giao."
+      }
+    ]
+  }
+  
