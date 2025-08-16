@@ -9,6 +9,7 @@ import { fileURLToPath } from 'url';
 import { sendText } from './zaloApi.js';
 import { generateReply } from './gemini.js';
 
+
 // ----------------- Setup -----------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -50,7 +51,7 @@ app.get('/webhook', (req, res) => {
 
 // ----------------- Webhook nhận tin (POST) -----------------
 app.post('/webhook', (req, res) => {
-  // Ack ngay để Zalo không timeout
+  // ACK ngay để Zalo không timeout
   res.status(200).send('ok');
 
   // Xử lý nền
@@ -58,19 +59,16 @@ app.post('/webhook', (req, res) => {
     try {
       const event = req.body || {};
 
-      // Lấy userId: hỗ trợ cả id & user_id ở nhiều nhánh
+      // userId: hỗ trợ cả id & user_id ở nhiều nhánh (theo log của bạn là sender.id)
       const userId =
         event?.sender?.user_id || event?.sender?.id ||
         event?.user?.user_id   || event?.user?.id   ||
-        (event?.recipient?.user_id && event?.event_name?.includes('oa_send') ? event?.recipient?.user_id : null) ||
-        null;
+        event?.recipient?.user_id || event?.recipient?.id || null;
 
-      // Lấy text
       const text =
         event?.message?.text ||
         event?.message?.content?.text ||
-        event?.text ||
-        null;
+        event?.text || null;
 
       console.log('[WEBHOOK] incoming:', JSON.stringify({ userId, text, raw: event }));
 
@@ -82,14 +80,15 @@ app.post('/webhook', (req, res) => {
       // Gọi LLM tạo trả lời
       let reply = 'Xin chào!';
       try {
-        const history = []; // có thể lưu lịch sử nếu cần
-        reply = (await generateReply(history, text)) || reply;
+        const history = [];
+        const gen = await generateReply(history, text);
+        if (gen && typeof gen === 'string') reply = gen;
       } catch (e) {
         console.error('[WEBHOOK] generateReply error:', e?.message || e);
       }
 
-      // Lấy access_token (chuẩn v4 trong zaloOauth.js)
-      const accessToken = await ensureAccessToken();
+      // Lấy access token (v4: secret_key header, form-urlencoded)
+      const accessToken = await oauth.ensureAccessToken();
 
       // Gửi trả lời về Zalo
       const sendResp = await sendText(accessToken, userId, reply);
@@ -113,7 +112,12 @@ app.use((req, res) => res.status(404).send('Not Found'));
 // ----------------- Start -----------------
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
+  // log vài biến quan trọng để debug nhanh
   console.log(`✅ Server listening on port ${port}`);
+  console.log('ENV check:',
+    'GOOGLE_API_KEY=', (process.env.GOOGLE_API_KEY || '').slice(0,5),
+    'ZALO_APP_ID=', process.env.ZALO_APP_ID
+  );
 });
 
 // ----------------- Safety logs -----------------
