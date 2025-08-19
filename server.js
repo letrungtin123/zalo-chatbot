@@ -1,144 +1,98 @@
 // server.js
-import "dotenv/config";
-import express from "express";
-import bodyParser from "body-parser";
-import path from "path";
-import { fileURLToPath } from "url";
-import cron from "node-cron";
-import fs from "fs/promises";
+import 'dotenv/config';
+import express from 'express';
+import bodyParser from 'body-parser';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
-import { generateReply } from "./gemini.js";
-import { sendCS } from "./zaloApi.js";
-// CHÚ Ý: tên file trên Linux phải đúng TRÙNG KHỚP chữ hoa/thường
-// Nếu file của bạn là zaloOAuth.js, import phải y chang:
-import { ensureAccessToken } from "./zaloOAuth.js";
+import { sendText } from './zaloApi.js';
+import { generateReply } from './gemini.js';
+import { ensureAccessToken } from './zaloOAuth.js';
 
-import { addSub, removeSub, loadSubs } from "./subscribersStore.js";
-
-// ------------------ Setup cơ bản ------------------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const app = express();                        // <-- PHẢI tạo app TRƯỚC khi dùng app.get/app.post
-app.set("trust proxy", true);
-app.use(bodyParser.json({ limit: "1mb" }));
+const app = express();
 
-// Serve static & file verify (nếu có)
-const publicDir = path.join(__dirname, "public");
-app.use(express.static(publicDir));
+app.set('trust proxy', true);
+app.use(bodyParser.json({ limit: '1mb' }));
 
-const VERIFY_FILENAME = process.env.ZALO_VERIFY_FILENAME || "";
-const VERIFY_CONTENT  = process.env.ZALO_VERIFY_CONTENT || "";
-if (VERIFY_FILENAME) {
-  const verifyPath = "/" + VERIFY_FILENAME.replace(/^\//, "");
-  app.get(verifyPath, async (_req, res) => {
-    if (VERIFY_CONTENT) {
-      res.setHeader("Content-Type", "text/plain; charset=utf-8");
-      return res.status(200).send(VERIFY_CONTENT);
-    }
-    try {
-      const filePath = path.join(publicDir, VERIFY_FILENAME);
-      const content = await fs.readFile(filePath);
-      res.status(200).end(content);
-    } catch {
-      res.status(404).send("Verifier file not found.");
-    }
-  });
-}
+// Serve static (nếu bạn có file verify)
+app.use(express.static(path.join(__dirname, 'public')));
 
-// Health check
-app.get("/health", (_req, res) => res.status(200).send("OK"));
+// Healthcheck
+app.get('/health', (_req, res) => res.status(200).send('OK'));
 
-// ------------------ Webhook ------------------
-app.post("/webhook", async (req, res) => {
+// GET webhook: luôn 200 (Zalo có thể ping)
+app.get('/webhook', (req, res) => {
+  return res.status(200).send('ok');
+});
+
+// POST webhook: chỉ xử lý khi là user_send_text + có userId & text
+app.post('/webhook', async (req, res) => {
   try {
-    const raw = req.body || {};
-    const ev  = raw?.event_name;
-    const senderId    = raw?.sender?.id || raw?.sender?.user_id;
-    const recipientId = raw?.recipient?.id || raw?.recipient?.user_id;
+    const ev = req.body || {};
+    const eventName = ev?.event_name || '';
 
-    // Theo dõi danh sách subscriber
-    if (ev === "user_follow"   && senderId) await addSub(senderId);
-    if (ev === "user_unfollow" && senderId) await removeSub(senderId);
-    if (ev === "user_send_text" && senderId) await addSub(senderId);
+    // userId và text ở nhiều vị trí khác nhau
+    const userId =
+      ev?.sender?.id ||
+      ev?.sender?.user_id ||
+      ev?.recipient?.user_id ||
+      null;
 
-    // Xử lý tin nhắn văn bản
-    if (ev === "user_send_text") {
-      const userId = senderId;
-      const text   = raw?.message?.text || "";
+    const text =
+      ev?.message?.text ||
+      ev?.message?.content?.text ||
+      ev?.text ||
+      null;
 
-      if (userId && text) {
-        const accessToken = await ensureAccessToken();
-        // Generate reply từ Gemini
-        const reply = await generateReply([], text);
-        const resp  = await sendCS(accessToken, userId, reply);
-        console.log("[WEBHOOK] sendText resp:", resp);
-      }
+    // 1) Không phải user_send_text -> acknowledge 200
+    if (eventName && eventName !== 'user_send_text') {
+      console.log('[WEBHOOK] non-text event -> 200', eventName);
+      return res.status(200).send('ok');
     }
 
-    res.status(200).send("ok");
-  } catch (e) {
-    console.error("[WEBHOOK] error:", e);
-    res.status(500).send("error");
-  }
-});
-
-// ------------------ Broadcast theo lịch ------------------
-async function broadcastAll(text) {
-  const accessToken = await ensureAccessToken();
-  const ids = await loadSubs();
-  if (!ids.length) {
-    console.log("[BROADCAST] List empty.");
-    return { ok: 0, fail: 0, total: 0 };
-  }
-
-  console.log(`[BROADCAST] Sending to ${ids.length} users ...`);
-  let ok = 0, fail = 0;
-  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-  for (const uid of ids) {
-    try {
-      const resp = await sendCS(accessToken, uid, text);
-      if (resp?.error === 0) ok++;
-      else fail++;
-    } catch (err) {
-      fail++;
-      console.error("[BROADCAST] send error:", uid, err?.response?.data || err?.message);
+    // 2) Thiếu userId/text -> acknowledge 200
+    if (!userId || !text) {
+      console.log('[WEBHOOK] missing userId/text -> 200', { userId, text });
+      return res.status(200).send('ok');
     }
-    await sleep(120); // tránh rate-limit
-  }
 
-  console.log("[BROADCAST] done:", { ok, fail, total: ids.length });
-  return { ok, fail, total: ids.length };
-}
-
-const TZ = process.env.TZ || "Asia/Ho_Chi_Minh";
-const BROADCAST_CRON  = process.env.BROADCAST_CRON || ""; // ví dụ "30 8 * * *"
-const BROADCAST_TEXT  = process.env.BROADCAST_TEXT || "🔔 Thông báo từ OA! Chúc bạn một ngày tốt lành!";
-const ADMIN_KEY       = process.env.ADMIN_KEY || "";
-
-if (BROADCAST_CRON) {
-  console.log("[CRON] schedule:", BROADCAST_CRON, "TZ:", TZ);
-  cron.schedule(BROADCAST_CRON, async () => {
+    // 3) Tạo reply từ Gemini (nếu lỗi vẫn tiếp tục ack 200)
+    let reply = 'Xin lỗi, mình đang bận chút. Bạn thử nhắn lại sau nhé!';
     try {
-      await broadcastAll(BROADCAST_TEXT);
+      reply = await generateReply([], text);
     } catch (e) {
-      console.error("[CRON] broadcast error:", e);
+      console.error('Gemini error:', e);
     }
-  }, { timezone: TZ });
-}
 
-// Admin bắn thử thủ công
-app.post("/admin/broadcast", async (req, res) => {
-  const key = req.query.key || req.body?.key;
-  if (!ADMIN_KEY || key !== ADMIN_KEY) return res.status(403).send("forbidden");
-  const text = req.body?.text || BROADCAST_TEXT;
-  const out = await broadcastAll(text);
-  res.json(out);
+    // 4) Lấy access token (nếu lỗi, vẫn ack 200)
+    let accessToken;
+    try {
+      accessToken = await ensureAccessToken();
+    } catch (e) {
+      console.error('[WEBHOOK] ensureAccessToken error', e);
+      return res.status(200).send('ok');
+    }
+
+    // 5) Gửi trả lời (nếu lỗi, vẫn ack 200)
+    try {
+      const resp = await sendText(accessToken, userId, reply);
+      console.log('[WEBHOOK] sendText resp:', resp);
+    } catch (e) {
+      console.error('[WEBHOOK] sendText error', e);
+    }
+
+    return res.status(200).send('ok');
+  } catch (e) {
+    console.error('[WEBHOOK] fatal', e);
+    // QUAN TRỌNG: vẫn trả 200 để Zalo không báo fail
+    return res.status(200).send('ok');
+  }
 });
 
-// ------------------ Start server ------------------
 const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log("✅ Server listening on port", port);
+  console.log(`✅ Server listening on port ${port}`);
 });

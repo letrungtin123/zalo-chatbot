@@ -1,109 +1,92 @@
 // zaloOAuth.js
-import "dotenv/config";
-import axios from "axios";
-import fs from "fs-extra";
+import 'dotenv/config';
+import axios from 'axios';
+import { loadTokens, saveTokens, isExpired } from './tokenStore.js';
 
-const OAUTH_BASE = process.env.ZALO_OAUTH_BASE || "https://oauth.zaloapp.com";
+const OAUTH_BASE = process.env.ZALO_OAUTH_BASE || 'https://oauth.zaloapp.com';
 const APP_ID     = process.env.ZALO_APP_ID;
-const SECRET_KEY = process.env.ZALO_APP_SECRET;                 // dùng làm secret_key ở header
-const REDIRECT   = process.env.ZALO_REDIRECT_URI || "";
-const TOK_FILE   = "./tokens.json";
+const APP_SECRET = process.env.ZALO_APP_SECRET;
 
-// KHÁY KHUYẾN NGHỊ: đặt refresh token vào ENV để không mất khi redeploy
-const REFRESH_ENV = process.env.ZALO_REFRESH_TOKEN || "";
-
-// ---- utils ----
-async function loadTokens() {
-  try {
-    if (!(await fs.pathExists(TOK_FILE))) return null;
-    return await fs.readJSON(TOK_FILE);
-  } catch {
-    return null;
-  }
-}
-async function saveTokens(tokens) {
-  await fs.writeJSON(TOK_FILE, tokens, { spaces: 2 });
-}
-function isExpired(tokens, skewSec = 120) {
-  if (!tokens?.expires_at) return true;
-  return Date.now() >= tokens.expires_at - skewSec * 1000;
-}
-
-// ---- OAuth flows ----
-async function exchangeCode(code) {
+// Exchange code -> ít dùng sau khi chạy ổn
+export async function exchangeCode(code, redirect_uri) {
   const url = `${OAUTH_BASE}/v4/oa/access_token`;
   const headers = {
-    "Content-Type": "application/x-www-form-urlencoded",
-    "secret_key": SECRET_KEY,               // <— BẮT BUỘC theo spec mới
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'secret_key': APP_SECRET
   };
-  const form = new URLSearchParams({
-    app_id: String(APP_ID),
-    grant_type: "authorization_code",
+  const body = new URLSearchParams({
+    app_id: APP_ID,
+    grant_type: 'authorization_code',
     code,
+    ...(redirect_uri ? { redirect_uri } : {})
   });
-  if (REDIRECT) form.set("redirect_uri", REDIRECT);
 
-  const { data } = await axios.post(url, form.toString(), { headers });
+  const { data } = await axios.post(url, body, { headers });
+  if (!data?.access_token) throw new Error(`Exchange failed: ${JSON.stringify(data)}`);
 
-  if (!data?.access_token) {
-    throw new Error("Exchange failed: " + JSON.stringify(data));
-  }
-  const expiresAt = Date.now() + (Number(data.expires_in) || 90000) * 1000;
-  const out = {
+  const expiresAt = Date.now() + (Number(data.expires_in) || 3600) * 1000;
+  const tokens = {
     access_token: data.access_token,
     refresh_token: data.refresh_token,
-    expires_at: expiresAt,
+    expires_at: expiresAt
   };
-  await saveTokens(out);
-  return out;
+  await saveTokens(tokens);
+  return tokens;
 }
 
-async function refreshToken() {
+async function refreshToken(refresh_token) {
   const url = `${OAUTH_BASE}/v4/oa/access_token`;
   const headers = {
-    "Content-Type": "application/x-www-form-urlencoded",
-    "secret_key": SECRET_KEY,               // <— BẮT BUỘC theo spec mới
+    'Content-Type': 'application/x-www-form-urlencoded',
+    'secret_key': APP_SECRET
   };
-
-  let stored = await loadTokens();
-  let refresh = stored?.refresh_token || REFRESH_ENV;
-  if (!refresh) throw new Error("No refresh_token available");
-
-  const form = new URLSearchParams({
-    app_id: String(APP_ID),
-    grant_type: "refresh_token",
-    refresh_token: refresh,
+  const body = new URLSearchParams({
+    app_id: APP_ID,
+    grant_type: 'refresh_token',
+    refresh_token
   });
 
-  const { data } = await axios.post(url, form.toString(), { headers });
-
+  const { data } = await axios.post(url, body, { headers });
   if (!data?.access_token) {
-    throw new Error("Refresh failed: " + JSON.stringify(data));
+    throw new Error(`Refresh failed: ${JSON.stringify(data)}`);
   }
-  const expiresAt = Date.now() + (Number(data.expires_in) || 90000) * 1000;
-  const out = {
+
+  const expiresAt = Date.now() + (Number(data.expires_in) || 3600) * 1000;
+  const newTokens = {
     access_token: data.access_token,
-    refresh_token: data.refresh_token || refresh,
-    expires_at: expiresAt,
+    refresh_token: data.refresh_token || refresh_token,
+    expires_at: expiresAt
   };
-  await saveTokens(out);
-  return out;
+  await saveTokens(newTokens);
+  return newTokens;
 }
 
 export async function ensureAccessToken() {
-  let t = await loadTokens();
+  // 1) Ưu tiên tokens.json
+  let tokens = await loadTokens();
 
-  // Không có tokens.json => thử REFRESH ENV, nếu không có thì dùng OAUTH_CODE_ONCE
-  if (!t) {
-    if (REFRESH_ENV) {
-      t = await refreshToken();
-    } else if (process.env.OAUTH_CODE_ONCE) {
-      t = await exchangeCode(process.env.OAUTH_CODE_ONCE);
-    } else {
-      throw new Error("No tokens found. Provide ZALO_REFRESH_TOKEN or OAUTH_CODE_ONCE.");
+  // 2) Nếu chưa có, thử lấy từ ENV (ZALO_ACCESS_TOKEN/ZALO_REFRESH_TOKEN)
+  if (!tokens) {
+    const envAccess  = process.env.ZALO_ACCESS_TOKEN || '';
+    const envRefresh = process.env.ZALO_REFRESH_TOKEN || '';
+    const expiresAt  = Date.now() + 10 * 60 * 1000; // 10 phút tạm
+    if (envAccess || envRefresh) {
+      tokens = {
+        access_token: envAccess,
+        refresh_token: envRefresh,
+        expires_at: expiresAt
+      };
+      await saveTokens(tokens);
     }
   }
 
-  if (isExpired(t)) t = await refreshToken();
-  return t.access_token;
+  // 3) Nếu có refresh token & token hết hạn/thiếu -> refresh
+  if (!tokens?.access_token || isExpired(tokens)) {
+    if (!tokens?.refresh_token) {
+      throw new Error('No refresh_token available to refresh access token');
+    }
+    tokens = await refreshToken(tokens.refresh_token);
+  }
+
+  return tokens.access_token;
 }
