@@ -2,18 +2,18 @@
 import axios from 'axios';
 const API_BASE = process.env.ZALO_API_BASE || 'https://openapi.zalo.me';
 
-// Gửi text (Message V3 CS)
+// Gửi text qua Message V3 CS (có quota/reply window)
 export async function sendText(accessToken, userId, text) {
   const url = `${API_BASE}/v3.0/oa/message/cs`;
   const payload = {
     recipient: { user_id: userId },
-    message  : { text },
+    message: { text }
   };
   const { data } = await axios.post(url, payload, {
     headers: {
       'Content-Type': 'application/json',
-      'access_token': accessToken, // V3 yêu cầu token trong HEADER
       'Accept': 'application/json',
+      'access_token': accessToken
     },
     timeout: 15000,
   });

@@ -1,35 +1,43 @@
 // subscribersStore.js
-import fs from "fs/promises";
+import fs from 'fs-extra';
 
-const FILE = "./subscribers.json";
+const FILE = './subscribers.json';
 
-export async function loadSubs() {
+async function loadRaw() {
   try {
-    const txt = await fs.readFile(FILE, "utf8");
-    const arr = JSON.parse(txt);
-    return Array.isArray(arr) ? Array.from(new Set(arr)) : [];
+    const ok = await fs.pathExists(FILE);
+    if (!ok) return [];
+    const arr = await fs.readJSON(FILE);
+    return Array.isArray(arr) ? arr : [];
   } catch {
     return [];
   }
 }
 
-export async function saveSubs(list) {
-  const unique = Array.from(new Set(list));
-  await fs.writeFile(FILE, JSON.stringify(unique, null, 2));
-  return unique;
+async function saveRaw(arr) {
+  await fs.writeJSON(FILE, Array.from(new Set(arr)), { spaces: 2 });
 }
 
-export async function addSub(id) {
-  if (!id) return;
-  const list = await loadSubs();
-  if (!list.includes(id)) {
-    list.push(id);
-    await saveSubs(list);
+export async function addSubscriber(userId) {
+  if (!userId) return;
+  const arr = await loadRaw();
+  if (!arr.includes(userId)) {
+    arr.push(userId);
+    await saveRaw(arr);
   }
 }
 
-export async function removeSub(id) {
-  const list = await loadSubs();
-  const next = list.filter((x) => x !== id);
-  await saveSubs(next);
+export async function removeSubscriber(userId) {
+  const arr = await loadRaw();
+  const next = arr.filter(id => id !== userId);
+  await saveRaw(next);
+}
+
+export async function getSubscribers() {
+  return await loadRaw();
+}
+
+export async function countSubscribers() {
+  const arr = await loadRaw();
+  return arr.length;
 }
