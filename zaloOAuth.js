@@ -7,22 +7,30 @@ const OAUTH_BASE = process.env.ZALO_OAUTH_BASE || 'https://oauth.zaloapp.com';
 const APP_ID     = process.env.ZALO_APP_ID;
 const APP_SECRET = process.env.ZALO_APP_SECRET;
 
+// TTL mặc định cho access token lấy từ ENV (23h) – an toàn với chuẩn 25h của Zalo
+const ENV_ACCESS_TTL_MS = Number(process.env.ZALO_ACCESS_TTL_MS || 23 * 3600 * 1000);
+
+// Cache trong RAM (sống theo lifecycle của process trên Render)
+let inMem = {
+  access_token: '',
+  refresh_token: '',
+  expires_at: 0, // ms epoch
+};
+
 function must(v, name) {
   if (!v) throw new Error(`Missing ${name} in environment`);
   return v;
 }
 
-function toForm(data) {
-  // x-www-form-urlencoded
+function form(data) {
   const p = new URLSearchParams();
   Object.entries(data).forEach(([k, v]) => p.append(k, v));
   return p;
 }
 
-async function postOAuth(path, form) {
-  // Zalo yêu cầu secret_key ở HEADER
+async function postOAuth(path, body) {
   const url = `${OAUTH_BASE}${path}`;
-  const { data } = await axios.post(url, toForm(form), {
+  const { data } = await axios.post(url, form(body), {
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
       'secret_key': must(APP_SECRET, 'ZALO_APP_SECRET'),
@@ -32,7 +40,6 @@ async function postOAuth(path, form) {
   return data;
 }
 
-/** Lần đầu đổi code -> access_token + refresh_token */
 export async function exchangeCode(code) {
   must(APP_ID, 'ZALO_APP_ID');
   must(APP_SECRET, 'ZALO_APP_SECRET');
@@ -44,23 +51,21 @@ export async function exchangeCode(code) {
     code,
   });
 
-  if (!data?.access_token) {
-    throw new Error(`Exchange failed: ${JSON.stringify(data)}`);
-  }
+  if (!data?.access_token) throw new Error(`Exchange failed: ${JSON.stringify(data)}`);
 
   const expiresAt = Date.now() + (Number(data.expires_in || 3600) * 1000);
   const tokens = {
     access_token: data.access_token,
     refresh_token: data.refresh_token,
-    expires_at  : expiresAt,
+    expires_at: expiresAt,
   };
 
-  // Lưu file khi chạy local (Render không cần lưu)
   try { await saveTokens(tokens); } catch {}
+  // update RAM cache
+  inMem = { ...tokens };
   return tokens;
 }
 
-/** Refresh access_token từ refresh_token */
 export async function refreshToken(refreshTokenStr) {
   must(APP_ID, 'ZALO_APP_ID');
   must(APP_SECRET, 'ZALO_APP_SECRET');
@@ -72,63 +77,91 @@ export async function refreshToken(refreshTokenStr) {
     refresh_token: refreshTokenStr,
   });
 
-  if (!data?.access_token) {
-    throw new Error(`Refresh failed: ${JSON.stringify(data)}`);
-  }
+  if (!data?.access_token) throw new Error(`Refresh failed: ${JSON.stringify(data)}`);
 
   const expiresAt = Date.now() + (Number(data.expires_in || 3600) * 1000);
   const tokens = {
     access_token: data.access_token,
     refresh_token: data.refresh_token || refreshTokenStr,
-    expires_at  : expiresAt,
+    expires_at: expiresAt,
   };
 
-  // Lưu file khi chạy local (Render không cần lưu)
   try { await saveTokens(tokens); } catch {}
+  inMem = { ...tokens };
   return tokens;
 }
 
-/** Lấy access_token “an toàn” cho mọi môi trường */
-// zaloOAuth.js - chỉ thay hàm ensureAccessToken
-
+/**
+ * Lấy access_token an toàn:
+ * - Nếu ENV có ACCESS mà KHÔNG có REFRESH -> dùng ACCESS, KHÔNG refresh, cache 23h.
+ * - Nếu ENV có cả ACCESS + REFRESH -> thử refresh khi cache hết hạn; nếu fail => Fallback dùng ACCESS.
+ * - Nếu không có ENV -> đọc tokens.json (local); chỉ refresh khi gần/đã hết hạn.
+ */
 export async function ensureAccessToken() {
+  const now = Date.now();
+
+  // 0) Có cache và chưa hết hạn -> dùng luôn
+  if (inMem.access_token && now < inMem.expires_at - 10_000) {
+    return inMem.access_token;
+  }
+
   const envAccess  = (process.env.ZALO_ACCESS_TOKEN || '').trim();
   const envRefresh = (process.env.ZALO_REFRESH_TOKEN || '').trim();
 
-  // 1) Có access token nhưng KHÔNG có refresh token -> dùng luôn, KHÔNG refresh
+  // 1) ENV: có ACCESS nhưng KHÔNG có REFRESH -> KHÔNG BAO GIỜ refresh
   if (envAccess && !envRefresh) {
-    return envAccess;
+    inMem = {
+      access_token: envAccess,
+      refresh_token: '',
+      expires_at: now + ENV_ACCESS_TTL_MS,
+    };
+    return inMem.access_token;
   }
 
-  // 2) Có cả 2 -> thử refresh, nếu fail thì fallback về access token hiện tại
+  // 2) ENV: có cả ACCESS + REFRESH
   if (envAccess && envRefresh) {
+    // Nếu chưa có cache, set tạm TTL ngắn rồi thử refresh
+    if (!inMem.access_token) {
+      inMem = {
+        access_token: envAccess,
+        refresh_token: envRefresh,
+        expires_at: now + 5 * 60 * 1000, // 5 phút
+      };
+    }
+
     try {
       const t = await refreshToken(envRefresh);
       return t.access_token;
     } catch (e) {
       console.warn('[OAUTH] refresh failed, fallback to env access token:', e.message);
-      return envAccess;
+      // Fallback dùng envAccess thêm TTL ngắn để không spam refresh
+      inMem = {
+        access_token: envAccess,
+        refresh_token: envRefresh,
+        expires_at: now + 60 * 60 * 1000, // 1h
+      };
+      return inMem.access_token;
     }
   }
 
   // 3) Local: đọc tokens.json
-  let tokens = await loadTokens();
-  if (!tokens) {
+  let fileTokens = await loadTokens();
+  if (!fileTokens) {
     const code = (process.env.OAUTH_CODE_ONCE || '').trim();
     if (code) {
-      tokens = await exchangeCode(code);
+      fileTokens = await exchangeCode(code);
     } else {
-      throw new Error('No tokens found (set ZALO_ACCESS_TOKEN or run exchange locally)');
+      throw new Error('No tokens found (set ZALO_ACCESS_TOKEN on Render or run exchange locally)');
     }
   }
 
-  if (!tokens.access_token) {
-    if (!tokens.refresh_token) throw new Error('No access_token/refresh_token available');
-    tokens = await refreshToken(tokens.refresh_token);
-  } else if (isExpired(tokens) && tokens.refresh_token) {
-    tokens = await refreshToken(tokens.refresh_token);
+  if (!fileTokens.access_token) {
+    if (!fileTokens.refresh_token) throw new Error('No access_token/refresh_token available');
+    fileTokens = await refreshToken(fileTokens.refresh_token);
+  } else if (isExpired(fileTokens) && fileTokens.refresh_token) {
+    fileTokens = await refreshToken(fileTokens.refresh_token);
   }
 
-  return tokens.access_token;
+  inMem = { ...fileTokens };
+  return inMem.access_token;
 }
-
