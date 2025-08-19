@@ -1,171 +1,324 @@
 // server.js
-import express from 'express';
-import bodyParser from 'body-parser';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import 'dotenv/config';
-import fs from 'fs';
-import cron from 'node-cron';
+import "dotenv/config";
+import express from "express";
+import bodyParser from "body-parser";
+import path from "path";
+import { fileURLToPath } from "url";
+import fs from "fs";
+import cron from "node-cron";
 
-import { sendText } from './zaloApi.js';
-import { generateReply } from './gemini.js';
-import { ensureAccessToken } from './zaloOAuth.js';
-import { addSubscriber, getSubscribers, countSubscribers } from './subscribersStore.js';
+import { sendText } from "./zaloApi.js";          // v3 /oa/message/cs (header access_token)
+import { generateReply } from "./gemini.js";
+import { ensureAccessToken } from "./zaloOAuth.js";
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 app.use(bodyParser.json());
 
-// Static (nếu cần xác thực HTML)
-const publicDir = path.join(__dirname, 'public');
-if (fs.existsSync(publicDir)) app.use(express.static(publicDir));
-
-app.get('/health', (_req, res) => res.status(200).send('OK'));
-
-// Chống gửi lặp theo msg_id (in-memory)
-const seenMsgIds = new Set();
-function rememberMsgId(id, ttlMs = 5 * 60 * 1000) {
-  if (!id) return;
-  seenMsgIds.add(id);
-  setTimeout(() => seenMsgIds.delete(id), ttlMs).unref?.();
+// ============== Static + Verifier (tùy chọn) ==============
+const publicDir = path.join(__dirname, "public");
+if (fs.existsSync(publicDir)) {
+  app.use(express.static(publicDir));     // https://host/<file>
+  app.use("/verify", express.static(publicDir)); // https://host/verify/<file>
 }
 
-// Webhook (chỉ phản hồi user_send_text)
-app.post('/webhook', async (req, res) => {
+// Trả lại nội dung xác thực theo ENV nếu có
+const VERIFY_FILENAME = process.env.ZALO_VERIFY_FILENAME || "";
+const VERIFY_CONTENT  = process.env.ZALO_VERIFY_CONTENT  || "";
+if (VERIFY_FILENAME) {
+  const verifyPath = "/" + VERIFY_FILENAME.replace(/^\//, "");
+  app.get(verifyPath, (req, res) => {
+    if (VERIFY_CONTENT) {
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      return res.status(200).send(VERIFY_CONTENT);
+    }
+    const onDisk = path.join(publicDir, VERIFY_FILENAME);
+    if (fs.existsSync(onDisk)) return res.sendFile(onDisk);
+    return res.status(404).send("Verifier file not found on server.");
+  });
+}
+
+// ============== Company Info (tùy chọn) ==============
+let companyInfo = null;
+const companyInfoPath = path.join(__dirname, "companyInfo.json");
+try {
+  if (fs.existsSync(companyInfoPath)) {
+    const raw = fs.readFileSync(companyInfoPath, "utf8");
+    companyInfo = JSON.parse(raw);
+    console.log("Loaded companyInfo.json");
+  }
+} catch (e) {
+  console.warn("⚠️ Cannot load companyInfo.json:", e.message);
+}
+
+// ============== Upstash Redis (ưu tiên) hoặc File store ==============
+const SUBS_FILE = path.join(__dirname, "subscribers.json");
+
+const UPSTASH_URL =
+  process.env.UPSTASH_REDIS_REST_URL ||
+  process.env.UPSTASH_REST_URL ||
+  "";
+const UPSTASH_TOKEN =
+  process.env.UPSTASH_REDIS_REST_TOKEN ||
+  process.env.UPSTASH_REST_TOKEN ||
+  "";
+const SUBS_KEY = process.env.SUBSCRIBERS_KEY || "zalo:subscribers";
+
+async function addSubscriber(userId) {
+  if (!userId) return;
+  // Ưu tiên Redis
+  if (UPSTASH_URL && UPSTASH_TOKEN) {
+    try {
+      const url = `${UPSTASH_URL}/sadd/${encodeURIComponent(
+        SUBS_KEY
+      )}/${encodeURIComponent(String(userId))}`;
+      const r = await fetch(url, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+      });
+      await r.text(); // bỏ qua kết quả
+      return;
+    } catch (e) {
+      console.error("[SUBS] upstash sadd error:", e.message);
+    }
+  }
+  // Fallback file
+  try {
+    let arr = [];
+    if (fs.existsSync(SUBS_FILE)) {
+      arr = JSON.parse(fs.readFileSync(SUBS_FILE, "utf8"));
+      if (!Array.isArray(arr)) arr = [];
+    }
+    const s = String(userId);
+    if (!arr.includes(s)) {
+      arr.push(s);
+      fs.writeFileSync(SUBS_FILE, JSON.stringify(arr, null, 2), "utf8");
+    }
+  } catch (e) {
+    console.error("[SUBS] file write error:", e.message);
+  }
+}
+
+async function loadSubscribers() {
+  // Ưu tiên Redis
+  if (UPSTASH_URL && UPSTASH_TOKEN) {
+    try {
+      const url = `${UPSTASH_URL}/smembers/${encodeURIComponent(SUBS_KEY)}`;
+      const r = await fetch(url, {
+        headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
+      });
+      const j = await r.json();
+      const ids = Array.isArray(j.result) ? j.result : [];
+      return ids.map(String);
+    } catch (e) {
+      console.error("[SUBS] upstash smembers error:", e.message);
+    }
+  }
+  // Fallback file
+  try {
+    if (!fs.existsSync(SUBS_FILE)) return [];
+    const raw = fs.readFileSync(SUBS_FILE, "utf8");
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+// ============== Helpers ==============
+function extractIncoming(evt) {
+  // Hỗ trợ mẫu Zalo v3 như log bạn đã gửi
+  const userId =
+    evt?.sender?.id ||
+    evt?.sender?.user_id ||
+    evt?.user?.user_id ||
+    null;
+
+  const text =
+    evt?.message?.text ||
+    evt?.message?.content?.text ||
+    evt?.text ||
+    null;
+
+  return { userId, text };
+}
+
+// ============== Health & Verify token ==============
+app.get("/health", (_req, res) => res.status(200).send("OK"));
+
+app.get("/webhook", (req, res) => {
+  if (req.query?.verify_token === process.env.VERIFY_TOKEN) return res.send("verified");
+  if (req.query?.challenge) return res.send(req.query.challenge);
+  res.send("ok");
+});
+
+// ============== OAuth callback (nếu tự làm flow thủ công) ==============
+app.get("/oauth/callback", (req, res) => {
+  const code = req.query.code || "";
+  res.send(`<h3>OAuth callback</h3><p>Code: ${code}</p>`);
+});
+
+// ============== WEBHOOK ZALO V3 ==============
+app.post("/webhook", async (req, res) => {
   try {
     const event = req.body || {};
-    const eventName = event?.event_name;
+    const { event_name } = event || {};
+    const { userId, text } = extractIncoming(event);
 
-    // chỉ xử lý khi là user_send_text
-    if (eventName !== 'user_send_text') {
-      return res.status(200).send('ok');
+    console.log(
+      "[WEBHOOK] incoming:",
+      JSON.stringify({ userId, text, raw: event }).slice(0, 1000)
+    );
+
+    // Lưu subscriber khi user follow/nhắn tin
+    if (userId && (event_name === "user_follow" || event_name === "user_send_text")) {
+      await addSubscriber(userId);
     }
 
-    const msgId  = event?.message?.msg_id;
-    if (msgId && seenMsgIds.has(msgId)) {
-      return res.status(200).send('ok');
+    // Bỏ qua các event không phải user_send_text
+    if (event_name !== "user_send_text") {
+      return res.status(200).send("ok");
     }
-    rememberMsgId(msgId);
-
-    const userId = event?.sender?.user_id || event?.sender?.id || null;
-    const text   = event?.message?.text || null;
 
     if (!userId || !text) {
-      return res.status(200).send('ok');
+      return res.status(200).send("ignored");
     }
 
-    // lưu subscriber
-    await addSubscriber(userId);
+    // Tạo trả lời bằng Gemini (đã có sys prompt trong gemini.js)
+    const history = [];
+    const reply = await generateReply(history, text, companyInfo);
 
-    // sinh reply
-    const reply = await generateReply([], text);
+    // Gửi trả lời bằng Zalo Message V3 /cs
+    const accessToken = await ensureAccessToken().catch((e) => {
+      console.error("[WEBHOOK] ensureAccessToken error", e);
+      return null;
+    });
 
-    // access token
-    let accessToken = '';
-    try {
-      accessToken = await ensureAccessToken();
-    } catch (e) {
-      console.warn('[WEBHOOK] ensureAccessToken warn:', e.message);
-      if (process.env.ZALO_ACCESS_TOKEN) {
-        accessToken = process.env.ZALO_ACCESS_TOKEN;
-      } else {
-        return res.status(200).send('ok');
-      }
+    if (accessToken) {
+      const resp = await sendText(accessToken, userId, reply);
+      console.log("[WEBHOOK] sendText resp:", resp);
     }
 
-    const resp = await sendText(accessToken, userId, reply);
-    console.log('[WEBHOOK] sendText resp:', resp);
-
-    return res.status(200).send('ok');
+    res.status(200).send("ok");
   } catch (e) {
-    console.error('[WEBHOOK] error:', e);
-    // Luôn trả 200 để Zalo không đánh lỗi webhook
-    return res.status(200).send('ok');
+    console.error("[WEBHOOK] error:", e);
+    res.status(200).send("ok"); // vẫn 200 để Zalo không retry dồn dập
   }
 });
 
-// Admin: xem số subscriber
-app.get('/admin/subscribers', async (_req, res) => {
-  try {
-    const list = await getSubscribers();
-    res.json({ count: list.length, sample: list.slice(0, 10) });
-  } catch (e) {
-    res.status(500).json({ error: e.message });
+// ============== BROADCAST (cron + manual debug) ==============
+const CRON_EXPR = process.env.BROADCAST_CRON || "10 22 * * *"; // 22:10 mặc định
+const CRON_TZ   = process.env.BROADCAST_TZ || "Asia/Ho_Chi_Minh";
+
+async function broadcastOnce(text) {
+  const list = await loadSubscribers();
+  if (!list.length) {
+    console.log(`[BROADCAST] No subscribers. Skip.`);
+    return { total: 0, sent: 0, failed: 0 };
   }
-});
 
-// Admin: bắn broadcast ngay (POST {text})
-app.post('/admin/broadcast', async (req, res) => {
-  try {
-    let body = '';
-    req.on('data', chunk => body += chunk);
-    await new Promise(r => req.on('end', r));
-    const parsed = body ? JSON.parse(body) : {};
-    const text = (parsed.text || '').trim();
-    if (!text) return res.status(400).json({ error: 'text required' });
-
-    const report = await broadcastToAll(text);
-    res.json(report);
-  } catch (e) {
-    console.error('[ADMIN] broadcast error', e);
-    res.status(500).json({ error: e.message });
+  const accessToken = await ensureAccessToken().catch((e) => {
+    console.error("[BROADCAST] ensureAccessToken error:", e);
+    return null;
+  });
+  if (!accessToken) {
+    return { total: list.length, sent: 0, failed: list.length };
   }
-});
 
-// Broadcast helper
-async function broadcastToAll(text) {
-  const users = await getSubscribers();
-  let accessToken = '';
-  try {
-    accessToken = await ensureAccessToken();
-  } catch (e) {
-    console.warn('[BROADCAST] ensureAccessToken warn:', e.message);
-    accessToken = process.env.ZALO_ACCESS_TOKEN || '';
-  }
-  if (!accessToken) throw new Error('No access token');
-
-  const results = { ok: 0, fail: 0, errors: [] };
-
-  // Gửi tuần tự để tránh rate-limit
-  for (const uid of users) {
+  let sent = 0, failed = 0;
+  for (const uid of list) {
     try {
       const r = await sendText(accessToken, uid, text);
-      if (r?.error === 0) results.ok++;
-      else {
-        results.fail++;
-        results.errors.push({ user_id: uid, resp: r });
-      }
-    } catch (e) {
-      results.fail++;
-      results.errors.push({ user_id: uid, error: e.message });
+      if (r?.error === 0) sent++;
+      else failed++;
+      await new Promise((r) => setTimeout(r, 150));
+    } catch {
+      failed++;
     }
-    // nho nhỏ để dịu rate-limit
-    await new Promise(r => setTimeout(r, 200));
   }
-  console.log('[BROADCAST] done:', results);
-  return results;
+  console.log(`[BROADCAST] Done. total=${list.length}, sent=${sent}, failed=${failed}`);
+  return { total: list.length, sent, failed };
 }
 
-// Cron: gửi theo lịch (nếu cấu hình)
-const CRON = (process.env.BROADCAST_CRON || '').trim();         // ví dụ: 0 9 * * *  (9:00 hằng ngày)
-const TZONE = process.env.BROADCAST_TZ || 'Asia/Ho_Chi_Minh';
-const BMSG = (process.env.BROADCAST_MESSAGE || '').trim();
+// Lên lịch tự động
+try {
+  console.log(`[CRON] schedule: ${CRON_EXPR} TZ: ${CRON_TZ}`);
+  cron.schedule(
+    CRON_EXPR,
+    async () => {
+      const text = process.env.BROADCAST_TEXT || "📣 Thông báo từ OA";
+      await broadcastOnce(text);
+    },
+    { timezone: CRON_TZ }
+  );
+} catch (e) {
+  console.warn("[CRON] cannot schedule:", e.message);
+}
 
-if (CRON && BMSG) {
-  console.log('[CRON] schedule:', CRON, 'TZ:', TZONE);
-  cron.schedule(CRON, async () => {
-    try {
-      await broadcastToAll(BMSG);
-    } catch (e) {
-      console.error('[CRON] broadcast error:', e);
+// ============== DEBUG ROUTES (test nhanh) ==============
+// GET /debug/subscribers  -> { count, sample }
+app.get("/debug/subscribers", async (req, res) => {
+  try {
+    if (process.env.DEBUG_TOKEN) {
+      const tok = req.query.token || req.headers["x-debug-token"];
+      if (tok !== process.env.DEBUG_TOKEN) return res.status(401).json({ error: "unauthorized" });
     }
-  }, { timezone: TZONE });
-}
-
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log('Gemini key prefix:', (process.env.GOOGLE_API_KEY || '').slice(0, 4));
-  console.log(`✅ Server listening on port ${port}`);
+    const list = await loadSubscribers();
+    return res.json({ count: list.length, sample: list.slice(0, 10) });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
 });
+
+// POST /debug/broadcast?dry=1&limit=10&text=...
+app.post("/debug/broadcast", async (req, res) => {
+  try {
+    if (process.env.DEBUG_TOKEN) {
+      const tok = req.query.token || req.headers["x-debug-token"];
+      if (tok !== process.env.DEBUG_TOKEN) return res.status(401).json({ error: "unauthorized" });
+    }
+    const dry   = req.query.dry === "1" || req.body?.dry === true;
+    const limit = req.query.limit ? parseInt(req.query.limit, 10) : undefined;
+    const text  = (req.body?.text || req.query.text || process.env.BROADCAST_TEXT || "📣 Thông báo từ OA").toString();
+
+    const all = await loadSubscribers();
+    const list = limit ? all.slice(0, limit) : all;
+
+    if (dry) {
+      return res.json({ dry: true, total: all.length, willSend: list.length, text });
+    }
+
+    const accessToken = await ensureAccessToken().catch((e) => {
+      return res.status(500).json({ error: "ensureAccessToken failed", detail: e.message });
+    });
+    if (!accessToken) return; // response đã trả ở trên
+
+    let sent = 0, failed = 0;
+    const errors = [];
+    for (const uid of list) {
+      try {
+        const resp = await sendText(accessToken, uid, text);
+        if (resp?.error === 0) {
+          sent++;
+        } else {
+          failed++;
+          errors.push({ uid, resp });
+        }
+        await new Promise((r) => setTimeout(r, 150));
+      } catch (err) {
+        failed++;
+        errors.push({ uid, error: err?.message || String(err) });
+      }
+    }
+    return res.json({ text, total: list.length, sent, failed, errors: errors.slice(0, 20) });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
+});
+
+// ============== START ==============
+const port = process.env.PORT || 3000;
+console.log("Gemini key prefix:", (process.env.GOOGLE_API_KEY || "").slice(0, 4));
+app.listen(port, () => console.log(`✅ Server listening on port ${port}`));
