@@ -89,41 +89,46 @@ export async function refreshToken(refreshTokenStr) {
 }
 
 /** Lấy access_token “an toàn” cho mọi môi trường */
+// zaloOAuth.js - chỉ thay hàm ensureAccessToken
+
 export async function ensureAccessToken() {
-  // 1) Ưu tiên ENV trên Render
   const envAccess  = (process.env.ZALO_ACCESS_TOKEN || '').trim();
   const envRefresh = (process.env.ZALO_REFRESH_TOKEN || '').trim();
 
-  let tokens = null;
+  // 1) Có access token nhưng KHÔNG có refresh token -> dùng luôn, KHÔNG refresh
+  if (envAccess && !envRefresh) {
+    return envAccess;
+  }
 
-  if (envAccess || envRefresh) {
-    // ép expired để buộc refresh khi có refresh token
-    tokens = {
-      access_token: envAccess,
-      refresh_token: envRefresh,
-      expires_at: Date.now() - 1,
-    };
-  } else {
-    // 2) Local: đọc file tokens.json
-    tokens = await loadTokens();
-    if (!tokens) {
-      // 3) Cho phép cấp bằng OAUTH_CODE_ONCE (nếu có)
-      const code = (process.env.OAUTH_CODE_ONCE || '').trim();
-      if (code) {
-        tokens = await exchangeCode(code);
-      } else {
-        throw new Error('No tokens found (please set ZALO_REFRESH_TOKEN on Render or run exchange locally)');
-      }
+  // 2) Có cả 2 -> thử refresh, nếu fail thì fallback về access token hiện tại
+  if (envAccess && envRefresh) {
+    try {
+      const t = await refreshToken(envRefresh);
+      return t.access_token;
+    } catch (e) {
+      console.warn('[OAUTH] refresh failed, fallback to env access token:', e.message);
+      return envAccess;
     }
   }
 
-  // Hết hạn hoặc chưa có access_token -> refresh
-  if (!tokens.access_token || isExpired(tokens)) {
-    if (!tokens.refresh_token) {
-      throw new Error('No refresh_token available to refresh access token');
+  // 3) Local: đọc tokens.json
+  let tokens = await loadTokens();
+  if (!tokens) {
+    const code = (process.env.OAUTH_CODE_ONCE || '').trim();
+    if (code) {
+      tokens = await exchangeCode(code);
+    } else {
+      throw new Error('No tokens found (set ZALO_ACCESS_TOKEN or run exchange locally)');
     }
+  }
+
+  if (!tokens.access_token) {
+    if (!tokens.refresh_token) throw new Error('No access_token/refresh_token available');
+    tokens = await refreshToken(tokens.refresh_token);
+  } else if (isExpired(tokens) && tokens.refresh_token) {
     tokens = await refreshToken(tokens.refresh_token);
   }
 
   return tokens.access_token;
 }
+
