@@ -1,41 +1,41 @@
 // tokenStore.js
-import fs from 'fs-extra';
+import fs from "fs/promises";
+import path from "path";
+import { fileURLToPath } from "url";
 
-const FILE = process.env.TOKEN_FILE || '/data/tokens.json';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+const FILE = path.join(__dirname, "tokens.json");
 
-// Upstash (free) – dùng nếu có REST_URL/REST_TOKEN
-const REST_URL  = process.env.UPSTASH_REST_URL;
-const REST_TOKEN= process.env.UPSTASH_REST_TOKEN;
-const TOKEN_KEY = process.env.TOKEN_KEY || 'zalo_tokens_v1';
+// Ưu tiên dùng Upstash Redis nếu có
+const UPSTASH_URL   = process.env.UPSTASH_REDIS_REST_URL || process.env.UPSTASH_REST_URL || "";
+const UPSTASH_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.UPSTASH_REST_TOKEN || "";
+const TOKENS_KEY    = process.env.ZALO_TOKENS_KEY || "zalo:oa:tokens";
 
-async function kvGet() {
-  const res = await fetch(`${REST_URL}/get/${encodeURIComponent(TOKEN_KEY)}`, {
-    headers: { Authorization: `Bearer ${REST_TOKEN}` }
-  });
-  if (!res.ok) return null;
-  const data = await res.json();
-  if (!data?.result) return null;
-  try { return JSON.parse(data.result); } catch { return null; }
+async function redisGetString(key) {
+  const url = `${UPSTASH_URL}/get/${encodeURIComponent(key)}`;
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } });
+  const j = await r.json();
+  return j?.result ?? null;
 }
-
-async function kvSet(obj) {
-  const value = encodeURIComponent(JSON.stringify(obj));
-  const res = await fetch(`${REST_URL}/set/${encodeURIComponent(TOKEN_KEY)}/${value}`, {
-    method: 'POST',
-    headers: { Authorization: `Bearer ${REST_TOKEN}` }
-  });
-  // optional: check res.json()
+async function redisSetString(key, val) {
+  const url = `${UPSTASH_URL}/set/${encodeURIComponent(key)}/${encodeURIComponent(val)}`;
+  await fetch(url, { method: "POST", headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` } });
 }
 
 export async function loadTokens() {
+  if (UPSTASH_URL && UPSTASH_TOKEN) {
+    try {
+      const s = await redisGetString(TOKENS_KEY);
+      if (s) return JSON.parse(s);
+    } catch (e) {
+      console.error("[TOKENS] upstash get error:", e.message);
+    }
+  }
   try {
-    if (REST_URL && REST_TOKEN) return await kvGet();
-    // fallback FS (chỉ dùng nếu có Disk)
-    const ok = await fs.pathExists(FILE);
-    if (!ok) return null;
-    return await fs.readJSON(FILE);
-  } catch (e) {
-    console.error('loadTokens error', e);
+    const raw = await fs.readFile(FILE, "utf8");
+    return JSON.parse(raw);
+  } catch {
     return null;
   }
 }
@@ -46,16 +46,22 @@ export async function saveTokens(tokens) {
     refresh_token: tokens.refresh_token,
     expires_at: tokens.expires_at, // ms epoch
   };
+  if (UPSTASH_URL && UPSTASH_TOKEN) {
+    try {
+      await redisSetString(TOKENS_KEY, JSON.stringify(data));
+      return;
+    } catch (e) {
+      console.error("[TOKENS] upstash set error:", e.message);
+    }
+  }
   try {
-    if (REST_URL && REST_TOKEN) return await kvSet(data);
-    await fs.ensureFile(FILE);
-    await fs.writeJSON(FILE, data, { spaces: 2 });
+    await fs.writeFile(FILE, JSON.stringify(data, null, 2), "utf8");
   } catch (e) {
-    console.error('saveTokens error', e);
+    console.error("[TOKENS] file write error:", e.message);
   }
 }
 
-export function isExpired(tokens, skewSec = 120) {
+export function isExpired(tokens, skewSec = 60) {
   if (!tokens?.expires_at) return true;
   return Date.now() >= (tokens.expires_at - skewSec * 1000);
 }

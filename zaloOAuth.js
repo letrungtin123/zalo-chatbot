@@ -1,91 +1,89 @@
 // zaloOAuth.js
-import 'dotenv/config';
-import axios from 'axios';
-import { loadTokens, saveTokens, isExpired } from './tokenStore.js';
+import "dotenv/config";
+import axios from "axios";
+import { loadTokens, saveTokens, isExpired } from "./tokenStore.js";
 
-const OAUTH_BASE = process.env.ZALO_OAUTH_BASE || 'https://oauth.zaloapp.com';
+const OAUTH_BASE = process.env.ZALO_OAUTH_BASE || "https://oauth.zaloapp.com";
 const APP_ID     = process.env.ZALO_APP_ID;
-const APP_SECRET = process.env.ZALO_APP_SECRET;
+const SECRET     = process.env.ZALO_APP_SECRET;
 
-// TTL cho access token lấy từ ENV (23 giờ)
-const ENV_ACCESS_TTL_MS = Number(process.env.ZALO_ACCESS_TTL_MS || 23 * 3600 * 1000);
-
-let inMem = { access_token: '', refresh_token: '', expires_at: 0 };
-
-function form(data) {
+function form(body) {
   const p = new URLSearchParams();
-  Object.entries(data).forEach(([k, v]) => p.append(k, v));
+  for (const [k, v] of Object.entries(body)) {
+    if (v !== undefined && v !== null) p.append(k, String(v));
+  }
   return p;
 }
 
-async function oauthPost(body) {
+async function postToken(bodyForm) {
   const url = `${OAUTH_BASE}/v4/oa/access_token`;
-  const { data } = await axios.post(url, form(body), {
+  const { data } = await axios.post(url, bodyForm, {
     headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-      'secret_key': process.env.ZALO_APP_SECRET
+      "Content-Type": "application/x-www-form-urlencoded",
+      "secret_key": SECRET,             // ✅ đúng theo docs mới
     },
-    timeout: 15000,
   });
-  return data;
+  if (!data?.access_token) {
+    throw new Error(`No access_token in response: ${JSON.stringify(data)}`);
+  }
+  const expiresAt = Date.now() + Number(data.expires_in || 3600) * 1000;
+  const tokens = {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token, // ⚠️ RT mới, phải lưu thay thế RT cũ
+    expires_at: expiresAt,
+  };
+  await saveTokens(tokens);
+  return tokens;
 }
 
 export async function exchangeCode(code) {
-  const data = await oauthPost({ app_id: APP_ID, grant_type: 'authorization_code', code });
-  if (!data?.access_token) throw new Error('Exchange failed: no access_token');
-  const expiresAt = Date.now() + (Number(data.expires_in || 3600) * 1000);
-  const tokens = { access_token: data.access_token, refresh_token: data.refresh_token, expires_at: expiresAt };
-  try { await saveTokens(tokens); } catch {}
-  inMem = { ...tokens };
-  return tokens;
+  return postToken(
+    form({
+      app_id: APP_ID,
+      grant_type: "authorization_code",
+      code,
+    })
+  );
 }
 
-export async function refreshToken(refreshToken) {
-  const data = await oauthPost({ app_id: APP_ID, grant_type: 'refresh_token', refresh_token: refreshToken });
-  if (!data?.access_token) throw new Error(`Refresh failed: ${JSON.stringify(data)}`);
-  const expiresAt = Date.now() + (Number(data.expires_in || 3600) * 1000);
-  const tokens = { access_token: data.access_token, refresh_token: data.refresh_token || refreshToken, expires_at: expiresAt };
-  try { await saveTokens(tokens); } catch {}
-  inMem = { ...tokens };
-  return tokens;
+export async function refreshWith(refresh_token) {
+  return postToken(
+    form({
+      app_id: APP_ID,
+      grant_type: "refresh_token",
+      refresh_token,
+    })
+  );
 }
 
 export async function ensureAccessToken() {
-  const now = Date.now();
+  // 1) Dùng token lưu trong store (Redis/file) nếu còn hạn
+  let tokens = await loadTokens();
+  if (tokens && !isExpired(tokens)) return tokens.access_token;
 
-  // cache hợp lệ
-  if (inMem.access_token && now < inMem.expires_at - 10_000) return inMem.access_token;
-
-  const envAccess  = (process.env.ZALO_ACCESS_TOKEN || '').trim();
-  const envRefresh = (process.env.ZALO_REFRESH_TOKEN || '').trim();
-
-  // CHẾ ĐỘ KHÔNG REFRESH: chỉ có ACCESS
-  if (envAccess && !envRefresh) {
-    inMem = { access_token: envAccess, refresh_token: '', expires_at: now + ENV_ACCESS_TTL_MS };
-    return inMem.access_token;
-  }
-
-  // Có cả ACCESS + REFRESH
-  if (envAccess && envRefresh) {
+  // 2) Hết hạn: refresh bằng RT đang lưu trong store
+  if (tokens?.refresh_token) {
     try {
-      const t = await refreshToken(envRefresh);
-      return t.access_token;
+      tokens = await refreshWith(tokens.refresh_token);
+      return tokens.access_token;
     } catch (e) {
-      console.warn('[OAUTH] refresh failed, fallback env access:', e.message);
-      inMem = { access_token: envAccess, refresh_token: envRefresh, expires_at: now + 60 * 60 * 1000 };
-      return inMem.access_token;
+      console.error("[OAUTH] refresh with stored RT failed:", e.response?.data || e.message);
     }
   }
 
-  // Local tokens.json
-  let tokens = await loadTokens();
-  if (!tokens) throw new Error('No tokens found. Set ZALO_ACCESS_TOKEN or run exchange locally.');
-  if (!tokens.access_token) {
-    if (!tokens.refresh_token) throw new Error('No access_token/refresh_token available');
-    tokens = await refreshToken(tokens.refresh_token);
-  } else if (isExpired(tokens) && tokens.refresh_token) {
-    tokens = await refreshToken(tokens.refresh_token);
+  // 3) Bootstrap bằng RT ở env (lần đầu deploy) → sẽ được lưu lại & xoay vòng tự động
+  const envRT = process.env.ZALO_REFRESH_TOKEN;
+  if (envRT) {
+    const t = await refreshWith(envRT);
+    return t.access_token;
   }
-  inMem = { ...tokens };
-  return inMem.access_token;
+
+  // 4) Hoặc dùng OAUTH_CODE_ONCE để đổi code → token
+  const code = process.env.OAUTH_CODE_ONCE;
+  if (code) {
+    const t = await exchangeCode(code);
+    return t.access_token;
+  }
+
+  throw new Error("No tokens available. Set ZALO_REFRESH_TOKEN or OAUTH_CODE_ONCE.");
 }
