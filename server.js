@@ -349,3 +349,16 @@ app.get("/debug/ask", async (req, res) => {
 const port = process.env.PORT || 3000;
 console.log("Gemini key prefix:", (process.env.GOOGLE_API_KEY || "").slice(0, 4));
 app.listen(port, () => console.log(`✅ Server listening on port ${port}`));
+const resp = await safeSendText(userId, reply);
+// Gửi 1 tin và tự refresh nếu token hết hạn
+async function safeSendText(userId, text) {
+  let token = await ensureAccessToken();
+  let resp  = await sendText(token, userId, text);
+
+  if (resp?.error === -216 && /expired/i.test(resp?.message || '')) {
+    // token hết hạn -> làm mới rồi gửi lại 1 lần
+    token = await ensureAccessToken({ force: true });
+    resp  = await sendText(token, userId, text);
+  }
+  return resp;
+}
