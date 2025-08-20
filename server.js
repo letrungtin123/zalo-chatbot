@@ -8,7 +8,7 @@ import fs from "fs";
 import cron from "node-cron";
 
 import { sendText } from "./zaloApi.js";      // V3 /oa/message/cs (header access_token)
-import { generateReply } from "./gemini.js";
+import { generateReply } from "./gemini.js";  // đã xử lý companyInfo + KB + fallback
 import { ensureAccessToken } from "./zaloOAuth.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -39,42 +39,60 @@ if (VERIFY_FILENAME) {
   });
 }
 
-// ============== Company Info (optional) ==============
+// ============== Company Info (from file) ==============
 let companyInfo = null;
 const companyInfoPath = path.join(__dirname, "companyInfo.json");
 try {
   if (fs.existsSync(companyInfoPath)) {
     companyInfo = JSON.parse(fs.readFileSync(companyInfoPath, "utf8"));
     console.log("Loaded companyInfo.json");
+  } else {
+    console.warn("⚠️ companyInfo.json not found (bot vẫn chạy, nhưng thiếu FAQ cục bộ).");
   }
 } catch (e) {
   console.warn("⚠️ Cannot load companyInfo.json:", e.message);
 }
 
 // ============== Knowledge Base (external API) ==============
-let KB_DOCS = [];
-const KB_API_BASE = process.env.KB_API_BASE || "https://asianasa.com:8443";
-const KB_API_PATH = process.env.KB_API_PATH || "/api/Introduce/list";
+// Env chuẩn bạn yêu cầu:
+const INTRO_API_BASE = process.env.INTRO_API_BASE || "https://asianasa.com:8443";
+const INTRO_API_PATH = process.env.INTRO_API_PATH || "/api/Introduce/list";
 
+// Lưu KB trong RAM
+let KB_DOCS = []; // [{id, title, contentHtml, contentText}]
+function stripHtml(html = "") {
+  return String(html)
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<p[\s\S]*?>/gi, "")
+    .replace(/<\/p>/gi, "\n")
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/\s+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 async function refreshKB() {
   try {
-    const full = `${KB_API_BASE.replace(/\/$/, "")}${KB_API_PATH}`;
+    const full = `${INTRO_API_BASE.replace(/\/$/, "")}${INTRO_API_PATH.startsWith("/") ? INTRO_API_PATH : "/"+INTRO_API_PATH}`;
     console.log("[KB] fetching:", full);
     const r = await fetch(full, { method: "GET" });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const j = await r.json();
     const items = Array.isArray(j?.data) ? j.data : [];
-    KB_DOCS = items.map(it => ({
-      id: it.id,
-      title: (it.title || "").trim(),
-      contentHtml: it.content || "",
-    }));
+    KB_DOCS = items.map(it => {
+      const title = (it.title || "").trim();
+      const contentHtml = it.content || "";
+      const contentText = stripHtml(contentHtml);
+      return { id: it.id, title, contentHtml, contentText };
+    });
     console.log("[KB] refreshed. docs=" + KB_DOCS.length);
   } catch (e) {
     console.log("[KB] refresh error:", e.message);
   }
 }
+// Nạp lần đầu + auto refresh 10 phút/lần
 await refreshKB().catch(()=>{});
-console.log("[KB] loaded");
+setInterval(refreshKB, 10 * 60 * 1000);
 
 // ============== Subscribers store (Upstash Redis or file) ==============
 const SUBS_FILE = path.join(__dirname, "subscribers.json");
@@ -110,7 +128,6 @@ async function addSubscriber(userId) {
     console.error("[SUBS] file write error:", e.message);
   }
 }
-
 async function loadSubscribers() {
   if (UPSTASH_URL && UPSTASH_TOKEN) {
     try {
@@ -182,11 +199,10 @@ app.post("/webhook", async (req, res) => {
     if (userId && (eventName === "user_follow" || eventName === "user_send_text")) {
       await addSubscriber(userId);
     }
-
     if (eventName !== "user_send_text") return res.status(200).send("ok");
     if (!userId || !text)              return res.status(200).send("ignored");
 
-    const history = [];
+    const history = []; // chỗ này bạn có thể lưu hội thoại nếu muốn
     const reply   = await generateReply(history, text, companyInfo, KB_DOCS);
 
     const resp = await safeSendText(userId, reply);
@@ -238,7 +254,7 @@ try {
 }
 
 // ============== Debug routes ==============
-// xem danh sách subscribers
+// Xem danh sách subscribers
 app.get("/debug/subscribers", async (req, res) => {
   try {
     if (process.env.DEBUG_TOKEN) {
@@ -252,7 +268,7 @@ app.get("/debug/subscribers", async (req, res) => {
   }
 });
 
-// gửi thử tới 1 user: /debug/ping?uid=xxx&text=Hello
+// Ping 1 user: /debug/ping?uid=xxx&text=Hello
 app.get("/debug/ping", async (req, res) => {
   try {
     if (process.env.DEBUG_TOKEN) {
@@ -270,35 +286,13 @@ app.get("/debug/ping", async (req, res) => {
   }
 });
 
-// broadcast thủ công: POST /debug/broadcast?dry=1&limit=10&text=...
-app.post("/debug/broadcast", async (req, res) => {
+// Xem KB đang nạp
+app.get("/debug/kb", async (_req, res) => {
   try {
-    if (process.env.DEBUG_TOKEN) {
-      const tok = req.query.token || req.headers["x-debug-token"];
-      if (tok !== process.env.DEBUG_TOKEN) return res.status(401).json({ error: "unauthorized" });
-    }
-    const dry   = req.query.dry === "1" || req.body?.dry === true;
-    const limit = req.query.limit ? parseInt(req.query.limit, 10) : undefined;
-    const text  = (req.body?.text || req.query.text || process.env.BROADCAST_TEXT || "📣 Thông báo từ OA").toString();
-
-    const all  = await loadSubscribers();
-    const list = limit ? all.slice(0, limit) : all;
-
-    if (dry) return res.json({ dry: true, total: all.length, willSend: list.length, text });
-
-    let sent = 0, failed = 0;
-    const errors = [];
-    for (const uid of list) {
-      try {
-        const resp = await safeSendText(uid, text);
-        if (resp?.error === 0) sent++;
-        else { failed++; errors.push({ uid, resp }); }
-        await new Promise(r => setTimeout(r, 150));
-      } catch (err) {
-        failed++; errors.push({ uid, error: err?.message || String(err) });
-      }
-    }
-    return res.json({ text, total: list.length, sent, failed, errors: errors.slice(0, 20) });
+    return res.json({
+      count: KB_DOCS.length,
+      titles: KB_DOCS.slice(0, 10).map(d => d.title),
+    });
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
