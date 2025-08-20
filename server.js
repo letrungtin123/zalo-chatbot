@@ -10,6 +10,7 @@ import cron from "node-cron";
 import { sendText } from "./zaloApi.js";          // v3 /oa/message/cs (header access_token)
 import { generateReply } from "./gemini.js";
 import { ensureAccessToken } from "./zaloOAuth.js";
+import { findIntroduceAnswer } from "./introduceApi.js"; // ✅ NEW
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -186,7 +187,32 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).send("ignored");
     }
 
-    // Tạo trả lời bằng Gemini (đã có sys prompt trong gemini.js)
+    // ✅ 1) Hỏi kiến thức động qua Introduce API theo title
+    let handledByIntroduce = false;
+    try {
+      const hit = await findIntroduceAnswer(text);
+      if (hit?.answer) {
+        const accessToken = await ensureAccessToken().catch((e) => {
+          console.error("[WEBHOOK] ensureAccessToken error", e);
+          return null;
+        });
+        if (accessToken) {
+          const header = `📘 ${hit.title}\n\n`;
+          const payload = (header + hit.answer).trim();
+          const resp = await sendText(accessToken, userId, payload);
+          console.log("[WEBHOOK] sendText (Introduce) resp:", resp);
+          handledByIntroduce = true;
+        }
+      }
+    } catch (e) {
+      console.error("[WEBHOOK] Introduce match error:", e?.message);
+    }
+
+    if (handledByIntroduce) {
+      return res.status(200).send("ok");
+    }
+
+    // ✅ 2) Nếu không match, mới gọi Gemini
     const history = [];
     const reply = await generateReply(history, text, companyInfo);
 
