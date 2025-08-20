@@ -2,49 +2,67 @@
 import "dotenv/config";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const apiKey = process.env.GOOGLE_API_KEY;
-const genAI = new GoogleGenerativeAI(apiKey);
-const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+const API_KEY = process.env.GOOGLE_API_KEY || "";
+const MODEL   = process.env.GOOGLE_MODEL || "gemini-1.5-flash";
+
+if (!API_KEY) {
+  console.warn("⚠️ Missing GOOGLE_API_KEY");
+}
+
+const genAI = new GoogleGenerativeAI(API_KEY);
 
 /**
- * kb: mảng {title, short} — đã rút gọn từ knowledge.js
+ * Tạo system prompt từ thông tin công ty + tri thức (kbDocs)
  */
-export async function generateReply(history, userText, companyInfo, kb = []) {
-  const sys = [
-    "Bạn là trợ lý Zalo OA của doanh nghiệp.",
-    "Chỉ trả lời dựa trên thông tin đã cho (companyInfo + knowledge).",
-    "Nếu không chắc, hãy nói bạn không có đủ dữ liệu và hướng dẫn liên hệ hotline.",
-  ].join("\n");
+function buildSystem(companyInfo, kbDocs = []) {
+  let sys = `Bạn là trợ lý CSKH của OA trên Zalo. Trả lời ngắn gọn, lịch sự, dùng tiếng Việt.
+- Nếu có thông tin trong tri thức, hãy ưu tiên dùng nó.
+- Nếu không chắc, xin phép người dùng cho biết thêm chi tiết hoặc để lại số điện thoại.
 
-  // ghép knowledge làm context
-  const kbBlock = kb.length
-    ? kb
-        .map(
-          (d, i) =>
-            `# Tài liệu ${i + 1}: ${d.title || "Không tiêu đề"}\n${d.short}`
-        )
-        .join("\n\n")
-    : "";
+`;
+  if (companyInfo) {
+    sys += `Thông tin doanh nghiệp:
+- Tên: ${companyInfo.companyName || ""}
+- Địa chỉ: ${companyInfo.address || ""}
+- Điện thoại: ${companyInfo.phone || ""}
+- Email: ${companyInfo.email || ""}
 
-  const companyBlock = companyInfo
-    ? `# Hồ sơ công ty\nTên: ${companyInfo.name || ""}\nĐịa chỉ: ${
-        companyInfo.address || ""
-      }\nHotline: ${companyInfo.phone || ""}\nWebsite: ${
-        companyInfo.website || ""
-      }`
-    : "";
+`;
+  }
+  if (kbDocs?.length) {
+    sys += `Tri thức nội bộ (tóm tắt):\n`;
+    for (const d of kbDocs.slice(0, 3)) {
+      const snippet = (d.contentText || "").slice(0, 600);
+      sys += `• ${d.title}: ${snippet}\n`;
+    }
+    sys += "\n";
+  }
+  return sys;
+}
 
-  const prompt = [
-    sys,
-    companyBlock,
-    kbBlock ? `# Tri thức từ API\n${kbBlock}` : "",
-    `# Câu hỏi của khách: ${userText}`,
-    "Yêu cầu: Trả lời ngắn gọn, dễ hiểu, giữ định dạng danh sách khi cần.",
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+/**
+ * history không dùng đến ở bản đơn giản (để trống [] cũng ok)
+ * userText: câu hỏi của người dùng
+ * companyInfo: thông tin công ty (để đưa vào system)
+ * kbDocs: top K tài liệu tìm được từ API /Introduce/list (để làm ngữ cảnh)
+ */
+export async function generateReply(history = [], userText = "", companyInfo = null, kbDocs = []) {
+  const systemInstruction = buildSystem(companyInfo, kbDocs);
 
-  const resp = await model.generateContent([{ role: "user", parts: [{ text: prompt }] }]);
-  const out = resp?.response?.text?.() || resp?.response?.candidates?.[0]?.content?.parts?.[0]?.text || "Xin lỗi, hiện chưa có thông tin phù hợp.";
-  return out.trim();
+  const model = genAI.getGenerativeModel({
+    model: MODEL,
+    systemInstruction,
+  });
+
+  // Truyền MỘT CHUỖI prompt -> SDK sẽ tạo JSON đúng (tránh lỗi role/parts)
+  const prompt = `Câu hỏi của khách: """${userText}"""\nHãy trả lời hữu ích, nếu có link trong tri thức thì nêu ra.`;
+
+  try {
+    const result = await model.generateContent(prompt);
+    const text = result.response.text().trim();
+    return text || "Xin lỗi, hiện mình chưa tạo được câu trả lời. Bạn có thể đặt lại câu hỏi nhé!";
+  } catch (e) {
+    console.error("Gemini error:", e);
+    return "Xin lỗi, hệ thống AI đang bận. Bạn vui lòng hỏi lại sau một chút nhé!";
+  }
 }
