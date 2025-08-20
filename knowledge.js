@@ -1,87 +1,92 @@
 // knowledge.js
-import { fetchIntroduceList } from "./apiClient.js";
-import { htmlToText } from "html-to-text";
+import "dotenv/config";
 
-const TTL = Number(process.env.INTRO_CACHE_TTL || 600000); // 10 phút
-let cache = { at: 0, docs: [] };
+// ===== Config =====
+const INTRO_API_URL_ENV = process.env.INTRO_API_URL || "";
+const INTRO_API_BASE    = process.env.INTRO_API_BASE || "";
+const INTRO_API_PATH    = process.env.INTRO_API_PATH || "/api/Introduce/list";
+const REFRESH_SECONDS   = Number(process.env.KB_REFRESH_SECONDS || 1800); // 30'
+let   lastFetchAt = 0;
 
-/**
- * Chuyển 1 bài (title + content HTML) => plain text ngắn gọn.
- */
-function normalizeDoc(item) {
-  const title = (item?.title || "").trim();
-  const html = item?.content || "";
-  const text = htmlToText(html, {
-    wordwrap: false,
-    selectors: [
-      { selector: "a", options: { ignoreHref: false } },
-      { selector: "img", format: "skip" },
-    ],
-  }).replace(/\n{3,}/g, "\n\n");
+function buildIntroduceUrl() {
+  // Ưu tiên full URL
+  if (INTRO_API_URL_ENV) return INTRO_API_URL_ENV.trim();
 
-  // Giữ bản đầy đủ + bản rút gọn 1200 ký tự cho Zalo
-  const short = text.length > 1200 ? text.slice(0, 1150) + "… (rút gọn)" : text;
-
-  return {
-    id: item?.id,
-    title,
-    short,
-    full: text,
-    type: item?.introduceTypeId || item?.type,
-  };
+  // Nếu không có, ghép BASE + PATH
+  if (!INTRO_API_BASE) {
+    throw new Error(
+      "Missing INTRO_API_URL or INTRO_API_BASE. Set INTRO_API_URL=https://host:port/api/Introduce/list " +
+      "OR INTRO_API_BASE=https://host:port and INTRO_API_PATH=/api/Introduce/list"
+    );
+  }
+  // new URL sẽ tự xử lý dấu '/'
+  return new URL(INTRO_API_PATH, INTRO_API_BASE).toString();
 }
 
-/** Refresh cache từ API nếu đã quá TTL */
+// ===== In-memory cache =====
+let DOCS = []; // { id, title, contentText, raw }
+
 export async function refreshIntroduceCache(force = false) {
   const now = Date.now();
-  if (!force && now - cache.at < TTL && cache.docs.length) return cache.docs;
+  if (!force && now - lastFetchAt < REFRESH_SECONDS * 1000) return DOCS;
 
+  const url = buildIntroduceUrl();
   try {
-    const items = await fetchIntroduceList();
-    cache = {
-      at: now,
-      docs: (items || []).map(normalizeDoc),
-    };
+    console.log("[KB] fetching:", url);
+    const r = await fetch(url, { method: "GET" });
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+    const j = await r.json();
+
+    const list = Array.isArray(j?.data) ? j.data : [];
+    // Convert HTML -> text “thô” rất đơn giản
+    const strip = (html) =>
+      (html || "")
+        .replace(/<br\s*\/?>/gi, "\n")
+        .replace(/<[^>]+>/g, "")
+        .replace(/\u00a0/g, " ")
+        .trim();
+
+    DOCS = list.map((it) => ({
+      id: it.id,
+      title: it.title || "",
+      contentText: strip(it.content || ""),
+      raw: it,
+    }));
+
+    lastFetchAt = now;
+    console.log(`[KB] refreshed. docs=${DOCS.length}`);
+    return DOCS;
   } catch (e) {
-    // nếu lỗi, giữ cache cũ
-    console.warn("[KB] refresh error:", e.message);
+    console.error("[KB] refresh error:", e.message);
+    if (DOCS.length === 0) throw e; // lần đầu mà fail thì ném lỗi ra
+    return DOCS; // có cache cũ thì cứ trả tạm
   }
-  return cache.docs;
 }
 
-/** Lấy docs (đảm bảo đã có cache) */
 export async function getDocs() {
-  await refreshIntroduceCache(false);
-  return cache.docs;
+  if (DOCS.length === 0) await refreshIntroduceCache(true);
+  return DOCS;
 }
 
-/** Tìm nhanh theo keyword: trả top N doc phù hợp */
-export async function searchDocs(query, limit = 3) {
-  const q = (query || "").toLowerCase();
-  const docs = await getDocs();
-  if (!q || !docs.length) return [];
+// Search rất đơn giản: score theo số lần khớp từ
+export async function searchDocs(query, topK = 3) {
+  if (!query || !query.trim()) return [];
+  await refreshIntroduceCache();
+  const q = query.toLowerCase();
 
-  // heuristics: match theo title trước, sau đó tới content
-  const scored = docs.map((d) => {
+  const scored = DOCS.map((d) => {
+    const hay = (d.title + " " + d.contentText).toLowerCase();
+    // điểm = số lần xuất hiện các keyword chính
     let score = 0;
-    if (d.title?.toLowerCase().includes(q)) score += 5;
-    if (d.full?.toLowerCase().includes(q)) score += 1;
-
-    // boost theo “từ điển” đơn giản
-    const rules = [
-      { k: ["bảo hành", "warranty"], t: /bảo\s*hành|warranty/i, w: 3 },
-      { k: ["giới thiệu", "introduce"], t: /giới\s*thiệu|introduce/i, w: 2 },
-      { k: ["trung tâm", "địa chỉ"], t: /địa\s*chỉ|trung\s*tâm/i, w: 2 },
-    ];
-    for (const r of rules) {
-      if (r.t.test(q)) score += r.w;
+    for (const token of q.split(/\s+/).filter(Boolean)) {
+      if (hay.includes(token)) score++;
     }
     return { d, score };
-  });
-
-  return scored
+  })
     .filter((x) => x.score > 0)
     .sort((a, b) => b.score - a.score)
-    .slice(0, limit)
+    .slice(0, topK)
     .map((x) => x.d);
+
+  return scored;
 }
