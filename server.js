@@ -10,7 +10,13 @@ import cron from "node-cron";
 import { sendText } from "./zaloApi.js";          // v3 /oa/message/cs (header access_token)
 import { generateReply } from "./gemini.js";
 import { ensureAccessToken } from "./zaloOAuth.js";
-import { findIntroduceAnswer } from "./introduceApi.js"; // ✅ NEW
+
+// Tri thức từ API Introduce/list (cache + search)
+import {
+  searchDocs,
+  refreshIntroduceCache,
+  getDocs,
+} from "./knowledge.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -21,7 +27,7 @@ app.use(bodyParser.json());
 // ============== Static + Verifier (tùy chọn) ==============
 const publicDir = path.join(__dirname, "public");
 if (fs.existsSync(publicDir)) {
-  app.use(express.static(publicDir));     // https://host/<file>
+  app.use(express.static(publicDir));           // https://host/<file>
   app.use("/verify", express.static(publicDir)); // https://host/verify/<file>
 }
 
@@ -79,7 +85,7 @@ async function addSubscriber(userId) {
         method: "POST",
         headers: { Authorization: `Bearer ${UPSTASH_TOKEN}` },
       });
-      await r.text(); // bỏ qua kết quả
+      await r.text();
       return;
     } catch (e) {
       console.error("[SUBS] upstash sadd error:", e.message);
@@ -161,6 +167,9 @@ app.get("/oauth/callback", (req, res) => {
   res.send(`<h3>OAuth callback</h3><p>Code: ${code}</p>`);
 });
 
+// ============== Nạp tri thức API ngay khi start (để lần đầu nhanh) ==============
+refreshIntroduceCache(true).then(() => console.log("[KB] loaded"));
+
 // ============== WEBHOOK ZALO V3 ==============
 app.post("/webhook", async (req, res) => {
   try {
@@ -170,7 +179,7 @@ app.post("/webhook", async (req, res) => {
 
     console.log(
       "[WEBHOOK] incoming:",
-      JSON.stringify({ userId, text, raw: event }).slice(0, 1000)
+      JSON.stringify({ event_name, userId, text }).slice(0, 500)
     );
 
     // Lưu subscriber khi user follow/nhắn tin
@@ -187,36 +196,14 @@ app.post("/webhook", async (req, res) => {
       return res.status(200).send("ignored");
     }
 
-    // ✅ 1) Hỏi kiến thức động qua Introduce API theo title
-    let handledByIntroduce = false;
-    try {
-      const hit = await findIntroduceAnswer(text);
-      if (hit?.answer) {
-        const accessToken = await ensureAccessToken().catch((e) => {
-          console.error("[WEBHOOK] ensureAccessToken error", e);
-          return null;
-        });
-        if (accessToken) {
-          const header = `📘 ${hit.title}\n\n`;
-          const payload = (header + hit.answer).trim();
-          const resp = await sendText(accessToken, userId, payload);
-          console.log("[WEBHOOK] sendText (Introduce) resp:", resp);
-          handledByIntroduce = true;
-        }
-      }
-    } catch (e) {
-      console.error("[WEBHOOK] Introduce match error:", e?.message);
-    }
+    // 1) Tìm tri thức liên quan từ API Introduce/list
+    const kb = await searchDocs(text, 3); // lấy tối đa 3 mục
 
-    if (handledByIntroduce) {
-      return res.status(200).send("ok");
-    }
-
-    // ✅ 2) Nếu không match, mới gọi Gemini
+    // 2) Tạo trả lời bằng Gemini (đưa companyInfo + kb làm context)
     const history = [];
-    const reply = await generateReply(history, text, companyInfo);
+    const reply = await generateReply(history, text, companyInfo, kb);
 
-    // Gửi trả lời bằng Zalo Message V3 /cs
+    // 3) Gửi trả lời bằng Zalo Message V3 /cs
     const accessToken = await ensureAccessToken().catch((e) => {
       console.error("[WEBHOOK] ensureAccessToken error", e);
       return null;
@@ -235,7 +222,7 @@ app.post("/webhook", async (req, res) => {
 });
 
 // ============== BROADCAST (cron + manual debug) ==============
-const CRON_EXPR = process.env.BROADCAST_CRON || "10 22 * * *"; // 22:10 mặc định
+const CRON_EXPR = process.env.BROADCAST_CRON || "55 22 * * *"; // 22:55 mặc định
 const CRON_TZ   = process.env.BROADCAST_TZ || "Asia/Ho_Chi_Minh";
 
 async function broadcastOnce(text) {
@@ -342,6 +329,20 @@ app.post("/debug/broadcast", async (req, res) => {
   } catch (e) {
     return res.status(500).json({ error: e.message });
   }
+});
+
+// GET /debug/kb -> xem cache tri thức
+app.get("/debug/kb", async (_req, res) => {
+  const docs = await getDocs();
+  res.json({ count: docs.length, titles: docs.map(d => d.title).slice(0, 10) });
+});
+
+// GET /debug/ask?q=... -> test hỏi nhanh
+app.get("/debug/ask", async (req, res) => {
+  const q = (req.query.q || "").toString();
+  const kb = await searchDocs(q, 3);
+  const ans = await generateReply([], q, companyInfo, kb);
+  res.json({ q, kb: kb.map(d => d.title), ans });
 });
 
 // ============== START ==============
