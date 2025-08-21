@@ -122,7 +122,10 @@ const INTRO_TIMEOUT = parseInt(process.env.INTRO_API_TIMEOUT || "8000", 10);
 const INTRO_TTL = parseInt(process.env.INTRO_CACHE_TTL || "600000", 10); // 10m
 
 const stripHtml = (html = "") =>
-  String(html).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  String(html)
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 
 class KnowledgeBase {
   constructor() {
@@ -193,7 +196,9 @@ function formatKbReply(doc) {
       }`
     : "";
   // KHÔNG dùng “mình tìm được…”, chỉ nêu tiêu đề + nội dung gọn
-  return `📘 ${doc.title}\n\n${summary}${footer}\n\nBạn cần chi tiết? Nhắn: "chi tiết ${doc.title.toLowerCase()}"`;
+  return `📘 ${
+    doc.title
+  }\n\n${summary}${footer}\n\nBạn cần chi tiết? Nhắn: "chi tiết ${doc.title.toLowerCase()}"`;
 }
 
 function tryCompanyInfoAnswer(userText) {
@@ -229,11 +234,15 @@ function tryCompanyInfoAnswer(userText) {
     return `⏰ Giờ làm việc: ${companyInfo.working_hours || "chưa thiết lập"}`;
   }
   if (/(liên hệ|hotline|số điện thoại|contact)/.test(t)) {
-    const hotline = companyInfo.hotline ? `Hotline: ${companyInfo.hotline}` : "";
+    const hotline = companyInfo.hotline
+      ? `Hotline: ${companyInfo.hotline}`
+      : "";
     const email = companyInfo.email
       ? (hotline ? " • " : "") + `Email: ${companyInfo.email}`
       : "";
-    return `📞 ${hotline}${email}` || "📞 Thông tin liên hệ hiện chưa thiết lập.";
+    return (
+      `📞 ${hotline}${email}` || "📞 Thông tin liên hệ hiện chưa thiết lập."
+    );
   }
   return null;
 }
@@ -284,10 +293,7 @@ function extractIncoming(evt) {
     evt?.sender?.id || evt?.sender?.user_id || evt?.user?.user_id || null;
 
   const text =
-    evt?.message?.text ||
-    evt?.message?.content?.text ||
-    evt?.text ||
-    null;
+    evt?.message?.text || evt?.message?.content?.text || evt?.text || null;
 
   return { userId, text, event_name: evt?.event_name };
 }
@@ -337,7 +343,10 @@ app.post("/webhook", async (req, res) => {
       JSON.stringify({ event_name, userId, text })
     );
 
-    if (userId && (event_name === "user_follow" || event_name === "user_send_text")) {
+    if (
+      userId &&
+      (event_name === "user_follow" || event_name === "user_send_text")
+    ) {
       await addSubscriber(userId);
     }
 
@@ -387,41 +396,39 @@ const CRON_EXPR = process.env.BROADCAST_CRON || "0 * * * *"; // mặc định m�
 const CRON_TZ = process.env.BROADCAST_TZ || "Asia/Ho_Chi_Minh";
 
 // 24 thông điệp – có thể override bằng env BROADCAST_TEXTS (JSON array)
-const HOURLY_TEXTS =
-  (process.env.BROADCAST_TEXTS &&
-    (() => {
-      try {
-        return JSON.parse(process.env.BROADCAST_TEXTS);
-      } catch {
-        return null;
-      }
-    })()) ||
-  [
-    "Chúc buổi sáng tốt lành!",
-    "Nhớ uống nước nhé!",
-    "Chúc bạn làm việc hiệu quả!",
-    "Giải lao chút cho khoẻ nhé!",
-    "Hỏi mình nếu bạn cần trợ giúp.",
-    "Cảm ơn bạn đã theo dõi OA.",
-    "Giữ gìn sức khoẻ nha!",
-    "Luôn tích cực và lạc quan!",
-    "Cần thông tin bảo hành? Hỏi mình.",
-    "Đã đến giờ vận động nhẹ!",
-    "Bạn có câu hỏi về sản phẩm?",
-    "Chúc bạn buổi trưa vui vẻ!",
-    "Cảm ơn bạn đã đồng hành cùng OA.",
-    "Nếu cần hỗ trợ kỹ thuật, nhắn mình nhé.",
-    "Luôn sẵn sàng hỗ trợ bạn!",
-    "Đừng quên giãn cơ một chút.",
-    "Bạn muốn biết thêm về dịch vụ?",
-    "Chúc bạn buổi chiều hiệu quả!",
-    "Giữ năng lượng tích cực nhé!",
-    "Cần liên hệ nhanh: hỏi ‘liên hệ’.",
-    "Chúc bạn buổi tối thư giãn!",
-    "Hỏi ‘bảo hành’ để xem chính sách.",
-    "Có thể hỏi ‘giới thiệu’ để biết thêm.",
-    "Chúc ngủ ngon và hẹn gặp lại!",
-  ];
+const HOURLY_TEXTS = (process.env.BROADCAST_TEXTS &&
+  (() => {
+    try {
+      return JSON.parse(process.env.BROADCAST_TEXTS);
+    } catch {
+      return null;
+    }
+  })()) || [
+  "⏰ 00:00 – Chúc bạn một đêm ngon giấc! Có gì cần hỗ trợ, cứ nhắn cho Công Ty JW Kim nhé.",
+  "⏰ 01:00 – Cảm ơn bạn đã theo dõi Công Ty JW Kim. Chúc bạn ngủ ngon!",
+  "⏰ 02:00 – Đội ngũ trực hệ thống 24/7. Cần gì bạn cứ nhắn tin.",
+  "⏰ 03:00 – Chúc bạn buổi đêm yên tĩnh. Công Ty JW Kim luôn sẵn sàng hỗ trợ.",
+  "⏰ 04:00 – Chuẩn bị cho một ngày mới tuyệt vời nhé!",
+  "⏰ 05:00 – Chúc buổi sáng tốt lành 🌤️",
+  "⏰ 06:00 – Khởi động ngày mới thật năng lượng!",
+  "⏰ 07:00 – Chúc bạn một ngày làm việc hiệu quả!",
+  "⏰ 08:00 – Nếu cần tư vấn, cứ nhắn Công Ty JW Kim ngay nhé.",
+  "⏰ 09:00 – Công Ty JW Kim có thể trợ giúp bạn về thông tin dịch vụ bất cứ lúc nào.",
+  "⏰ 10:00 – Đừng quên uống nước và thư giãn một chút!",
+  "⏰ 11:00 – Gần trưa rồi, chúc bạn bữa trưa ngon miệng 🍽️",
+  "⏰ 12:00 – Trưa tốt lành! Cần hỗ trợ gấp? Hãy reply tin nhắn này.",
+  "⏰ 13:00 – Buổi chiều thật nhiều năng lượng nhé!",
+  "⏰ 14:00 – Công Ty JW Kim luôn sẵn sàng trả lời câu hỏi của bạn.",
+  "⏰ 15:00 – Nghỉ ngơi 5 phút cho tỉnh táo nào ☕",
+  '⏰ 16:00 – Nếu bạn muốn biết thêm về dịch vụ, hãy nhắn "dịch vụ".',
+  "⏰ 17:00 – Sắp hết giờ làm, bạn cần Công Ty JW Kim hỗ trợ gì không?",
+  "⏰ 18:00 – Chúc bạn buổi tối vui vẻ!",
+  "⏰ 19:00 – Có câu hỏi nào cho Công Ty JW Kim không? Cứ nhắn nhé.",
+  '⏰ 20:00 – Công Ty JW Kim có nhiều thông tin hữu ích, thử hỏi: "liên hệ", "giờ làm", "địa chỉ"…',
+  "⏰ 21:00 – Chúc bạn buổi tối thư giãn.",
+  "⏰ 22:00 – Đừng quên nghỉ ngơi sớm để mai thật khoẻ nhé!",
+  "⏰ 23:00 – Kết thúc ngày thật nhẹ nhàng. Công Ty JW Kim luôn ở đây 🤝",
+];
 
 function hourIndex(date = new Date()) {
   const tz = CRON_TZ || "Asia/Ho_Chi_Minh";
@@ -504,8 +511,11 @@ app.post("/debug/broadcast", async (req, res) => {
       return res.status(401).json({ error: "unauthorized" });
 
     const text =
-      (req.body?.text || req.query.text || process.env.BROADCAST_TEXT)?.toString() ||
-      "🔔 Thông báo từ OA.";
+      (
+        req.body?.text ||
+        req.query.text ||
+        process.env.BROADCAST_TEXT
+      )?.toString() || "🔔 Thông báo từ OA.";
     const result = await broadcastOnce(text); // đã tự thêm prefix bên trong
     res.json({ text: withAutoPrefix(text), ...result });
   } catch (e) {
@@ -515,5 +525,8 @@ app.post("/debug/broadcast", async (req, res) => {
 
 // ----------------- Start -----------------
 const port = process.env.PORT || 3000;
-console.log("Gemini key prefix:", (process.env.GOOGLE_API_KEY || "").slice(0, 4));
+console.log(
+  "Gemini key prefix:",
+  (process.env.GOOGLE_API_KEY || "").slice(0, 4)
+);
 app.listen(port, () => console.log(`✅ Server listening on port ${port}`));
