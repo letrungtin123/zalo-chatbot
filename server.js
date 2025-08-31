@@ -293,11 +293,11 @@ function renderTopicsMsg(topics) {
   if (!topics?.length) return "Hiện chưa có chủ đề nào.";
   const lines = topics.map((t, i) => `${i + 1}. ${t.name}`);
   return [
-    "Vui lòng chọn **Chủ đề** (gõ số hoặc tên):",
+    "Vui lòng chọn **Chủ đề**:",
     "",
     ...lines,
     "",
-    "Bạn cũng có thể gõ tên chủ đề trực tiếp."
+    "Hãy gõ tên chủ đề trực tiếp 💞"
   ].join("\n");
 }
 
@@ -349,7 +349,7 @@ app.post("/webhook", async (req, res) => {
 
     // 0) “ok / cảm ơn”
     if (isThanksOrOk(text)) {
-      const ack = "Cảm ơn bạn đã quan tâm, theo dõi và sử dụng dịch vụ của công ty JW Kim";
+      const ack = "Cảm ơn bạn đã quan tâm, theo dõi và sử dụng dịch vụ của công ty JW Kim 💞";
       await safeSendText(userId, withAutoPrefix(ack));
       return res.status(200).send("ok");
     }
