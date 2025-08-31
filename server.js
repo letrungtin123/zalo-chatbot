@@ -9,7 +9,10 @@ import cron from "node-cron";
 
 import { ensureAccessToken } from "./zaloOAuth.js";
 import { sendText } from "./zaloApi.js";
-import { generateReply } from "./gemini.js"; // fallback nếu KB/FAQ không đáp ứng
+import { generateReply } from "./gemini.js";
+
+import { getTopics, getQAByTopic, getSchedules } from "./chatboxApi.js";
+import { setState, getState, clearState } from "./sessionStore.js";
 
 // ----------------- Base setup -----------------
 const __filename = fileURLToPath(import.meta.url);
@@ -17,17 +20,14 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(bodyParser.json());
 
-// static + optional verify folder
 const publicDir = path.join(__dirname, "public");
 if (fs.existsSync(publicDir)) {
   app.use(express.static(publicDir));
   app.use("/verify", express.static(publicDir));
 }
 
-// health
 app.get("/health", (_req, res) => res.status(200).send("OK"));
 
-// webhook GET verify (nếu cần)
 app.get("/webhook", (req, res) => {
   const verifyToken = process.env.VERIFY_TOKEN || "";
   if (verifyToken && req.query?.verify_token === verifyToken) {
@@ -37,7 +37,7 @@ app.get("/webhook", (req, res) => {
   res.status(200).send("ok");
 });
 
-// ----------------- Load company info -----------------
+// ----------------- Company info -----------------
 let companyInfo = null;
 const companyInfoPath = path.join(__dirname, "companyInfo.json");
 try {
@@ -49,7 +49,7 @@ try {
   console.warn("⚠️ Cannot load companyInfo.json:", e.message);
 }
 
-// ----------------- Subscribers store (Upstash/FILE) -----------------
+// ----------------- Subscribers store (file/upstash) -----------------
 const SUBS_FILE = path.join(__dirname, "subscribers.json");
 const UPSTASH_URL =
   process.env.UPSTASH_REDIS_REST_URL || process.env.UPSTASH_REST_URL || "";
@@ -59,7 +59,6 @@ const SUBS_KEY = process.env.SUBSCRIBERS_KEY || "zalo:subscribers";
 
 async function addSubscriber(userId) {
   if (!userId) return;
-  // prefer upstash
   if (UPSTASH_URL && UPSTASH_TOKEN) {
     try {
       const url = `${UPSTASH_URL}/sadd/${encodeURIComponent(
@@ -74,7 +73,6 @@ async function addSubscriber(userId) {
       console.error("[SUBS] upstash sadd error:", e.message);
     }
   }
-  // fallback file
   try {
     let arr = [];
     if (fs.existsSync(SUBS_FILE)) {
@@ -115,12 +113,11 @@ async function loadSubscribers() {
   }
 }
 
-// ----------------- Knowledge Base from API -----------------
+// ----------------- KB giản lược (giữ nguyên code cũ) -----------------
 const INTRO_BASE = process.env.INTRO_API_BASE || "";
 const INTRO_PATH = process.env.INTRO_API_PATH || "/api/Introduce/list";
 const INTRO_TIMEOUT = parseInt(process.env.INTRO_API_TIMEOUT || "8000", 10);
-const INTRO_TTL = parseInt(process.env.INTRO_CACHE_TTL || "600000", 10); // 10m
-
+const INTRO_TTL = parseInt(process.env.INTRO_CACHE_TTL || "600000", 10);
 const stripHtml = (html = "") =>
   String(html)
     .replace(/<[^>]*>/g, " ")
@@ -129,16 +126,13 @@ const stripHtml = (html = "") =>
 
 class KnowledgeBase {
   constructor() {
-    this.docs = []; // { id, title, text }
+    this.docs = [];
     this.last = 0;
   }
-  get stale() {
-    return Date.now() - this.last > INTRO_TTL;
-  }
+  get stale() { return Date.now() - this.last > INTRO_TTL; }
   async refresh(force = false) {
     if (!INTRO_BASE) return;
     if (!force && !this.stale && this.docs.length) return;
-
     const url = `${INTRO_BASE}${INTRO_PATH}`;
     console.log("[KB] fetching:", url);
     try {
@@ -160,22 +154,18 @@ class KnowledgeBase {
       console.warn("[KB] refresh error:", e.message || e);
     }
   }
-  list() {
-    return this.docs.slice();
-  }
+  list() { return this.docs.slice(); }
 }
-
 const KB = new KnowledgeBase();
 KB.refresh(true).then(() => console.log("[KB] loaded"));
 
-// ----------------- Text helpers & Answerers -----------------
+// ----------------- Helpers & default answerers -----------------
 const norm = (s = "") =>
   s.toLowerCase().normalize("NFC").replace(/\s+/g, " ").trim();
 
 function summarize(text = "", max = 700) {
   const t = (text || "").replace(/\s+/g, " ").trim();
   if (t.length <= max) return t;
-
   const sentences = t.split(/(?<=[\.\!\?])\s+/);
   let out = "";
   for (const s of sentences) {
@@ -187,25 +177,10 @@ function summarize(text = "", max = 700) {
   return out.trim() + "…";
 }
 
-function formatKbReply(doc) {
-  const summary = summarize(doc.text || "", 700);
-  const hasContact = companyInfo?.hotline || companyInfo?.email;
-  const footer = hasContact
-    ? `\n\n📞 Liên hệ: ${companyInfo?.hotline || ""}${
-        companyInfo?.email ? " • " + companyInfo.email : ""
-      }`
-    : "";
-  // KHÔNG dùng “mình tìm được…”, chỉ nêu tiêu đề + nội dung gọn
-  return `📘 ${
-    doc.title
-  }\n\n${summary}${footer}\n\nBạn cần chi tiết? Nhắn: "chi tiết ${doc.title.toLowerCase()}"`;
-}
-
 function tryCompanyInfoAnswer(userText) {
   if (!companyInfo) return null;
   const t = norm(userText);
 
-  // chào hỏi
   if (/^(hi|hello|xin chào|chào|helo|heloo)\b/i.test(userText)) {
     const name = companyInfo.name || "OA";
     return (
@@ -214,7 +189,6 @@ function tryCompanyInfoAnswer(userText) {
     );
   }
 
-  // theo FAQ
   if (Array.isArray(companyInfo.faq)) {
     for (const item of companyInfo.faq) {
       const qs = Array.isArray(item.q) ? item.q : item.q ? [item.q] : [];
@@ -223,7 +197,6 @@ function tryCompanyInfoAnswer(userText) {
     }
   }
 
-  // intent phổ biến
   if (t.includes("tên công ty")) {
     return `🏢 Tên công ty: **${companyInfo.name || "chưa thiết lập"}**`;
   }
@@ -234,15 +207,9 @@ function tryCompanyInfoAnswer(userText) {
     return `⏰ Giờ làm việc: ${companyInfo.working_hours || "chưa thiết lập"}`;
   }
   if (/(liên hệ|hotline|số điện thoại|contact)/.test(t)) {
-    const hotline = companyInfo.hotline
-      ? `Hotline: ${companyInfo.hotline}`
-      : "";
-    const email = companyInfo.email
-      ? (hotline ? " • " : "") + `Email: ${companyInfo.email}`
-      : "";
-    return (
-      `📞 ${hotline}${email}` || "📞 Thông tin liên hệ hiện chưa thiết lập."
-    );
+    const hotline = companyInfo.hotline ? `Hotline: ${companyInfo.hotline}` : "";
+    const email   = companyInfo.email   ? (hotline ? " • " : "") + `Email: ${companyInfo.email}` : "";
+    return `📞 ${hotline}${email}` || "📞 Thông tin liên hệ hiện chưa thiết lập.";
   }
   return null;
 }
@@ -251,50 +218,32 @@ function tryKbAnswer(userText) {
   const docs = KB.list();
   if (!docs.length) return null;
   const t = norm(userText);
-
-  // “chi tiết …”
   const mDetail = /chi ?ti[eê]t\s+(.+)/i.exec(userText);
   if (mDetail) {
     const q = norm(mDetail[1]);
     const doc =
       docs.find((d) => norm(d.title).includes(q)) ||
-      docs.find((d) => (d.text || "").toLowerCase().includes(q)) ||
-      null;
+      docs.find((d) => (d.text || "").toLowerCase().includes(q)) || null;
     if (doc) {
       const long = summarize(doc.text || "", 1600);
-      return formatKbReply({ ...doc, text: long });
+      return `📘 ${doc.title}\n\n${long}`;
     }
   }
-
-  // ưu tiên các nhóm
-  const priority = [
-    { key: "bảo hành", re: /bảo hành/i },
-    { key: "giới thiệu", re: /giới thiệu/i },
-    { key: "lỗi", re: /lỗi|ngoài điều kiện/i },
-  ];
-  let doc = null;
-  for (const p of priority) {
-    if (t.includes(p.key)) {
-      doc = docs.find((d) => p.re.test(d.title));
-      if (doc) break;
-    }
-  }
-  if (!doc) doc = docs.find((d) => norm(d.title).includes(t)) || null;
+  let doc = docs.find((d) => norm(d.title).includes(t)) || null;
   if (!doc && t.length >= 8)
     doc = docs.find((d) => (d.text || "").toLowerCase().includes(t)) || null;
   if (!doc) doc = docs.find((d) => /giới thiệu/i.test(d.title)) || docs[0];
   if (!doc) return null;
-  return formatKbReply(doc);
+  const summary = summarize(doc.text || "", 700);
+  return `📘 ${doc.title}\n\n${summary}`;
 }
 
 // ----------------- Zalo helpers -----------------
 function extractIncoming(evt) {
   const userId =
     evt?.sender?.id || evt?.sender?.user_id || evt?.user?.user_id || null;
-
   const text =
     evt?.message?.text || evt?.message?.content?.text || evt?.text || null;
-
   return { userId, text, event_name: evt?.event_name };
 }
 
@@ -316,7 +265,7 @@ async function safeSendText(userId, text) {
   }
 }
 
-// ---------- Auto prefix for all outgoing messages ----------
+// ---------- Auto prefix ----------
 const AUTO_PREFIX =
   process.env.AUTO_PREFIX || "🤖 Đây là tin nhắn tự động của chatbot.";
 function withAutoPrefix(text) {
@@ -332,36 +281,140 @@ function withAutoPrefix(text) {
   return `${AUTO_PREFIX}\n\n${t}`;
 }
 
+function isThanksOrOk(userText = "") {
+  const t = norm(userText);
+  if (/^(ok|oke|okay|oki|okie)\b/.test(t)) return true;
+  if (/(cảm ơn|cam on|thanks|thank you)/.test(t)) return true;
+  return false;
+}
+
+// ----------------- ChatboxAIQA FLOW -----------------
+function renderTopicsMsg(topics) {
+  if (!topics?.length) return "Hiện chưa có chủ đề nào.";
+  const lines = topics.map((t, i) => `${i + 1}. ${t.name}`);
+  return [
+    "Vui lòng chọn **Chủ đề** (gõ số hoặc tên):",
+    "",
+    ...lines,
+    "",
+    "Bạn cũng có thể gõ tên chủ đề trực tiếp."
+  ].join("\n");
+}
+
+function renderQuestionsMsg(topicName, qas) {
+  if (!qas?.length) return `Chủ đề **${topicName}** hiện chưa có câu hỏi.`;
+  const lines = qas.map((q, i) => `${i + 1}. ${q.question}`);
+  return [
+    `Chủ đề: **${topicName}**`,
+    "Chọn **Câu hỏi** (gõ số hoặc trích nội dung):",
+    "",
+    ...lines
+  ].join("\n");
+}
+
+function parsePick(text, list, fields = ["name", "question"]) {
+  // ưu tiên chọn theo số
+  const n = Number(text?.trim());
+  if (Number.isInteger(n) && n >= 1 && n <= list.length) {
+    return list[n - 1];
+  }
+  // hoặc theo tên/string match 1 phần
+  const t = norm(text || "");
+  let best = null, bestScore = 0;
+  for (const it of list) {
+    const hay = fields.map(f => norm(String(it[f] || ""))).join(" ");
+    let score = 0;
+    t.split(/\s+/).forEach(tok => { if (tok && hay.includes(tok)) score++; });
+    if (score > bestScore) { best = it; bestScore = score; }
+  }
+  return bestScore > 0 ? best : null;
+}
+
 // ----------------- Webhook -----------------
 app.post("/webhook", async (req, res) => {
   try {
-    await KB.refresh(); // refresh nhẹ theo TTL
+    await KB.refresh();
+
     const event = req.body || {};
     const { userId, text, event_name } = extractIncoming(event);
-    console.log(
-      "[WEBHOOK] incoming:",
-      JSON.stringify({ event_name, userId, text })
-    );
+    console.log("[WEBHOOK] incoming:", JSON.stringify({ event_name, userId, text }));
 
-    if (
-      userId &&
-      (event_name === "user_follow" || event_name === "user_send_text")
-    ) {
+    if (userId && (event_name === "user_follow" || event_name === "user_send_text")) {
       await addSubscriber(userId);
     }
-
     if (event_name !== "user_send_text") {
       return res.status(200).send("ok");
     }
     if (!userId || !text) return res.status(200).send("ignored");
 
-    // 1) company info nhanh – chuyên nghiệp
+    // 0) “ok / cảm ơn”
+    if (isThanksOrOk(text)) {
+      const ack = "Cảm ơn bạn đã quan tâm, theo dõi và sử dụng dịch vụ của công ty JW Kim";
+      await safeSendText(userId, withAutoPrefix(ack));
+      return res.status(200).send("ok");
+    }
+
+    // ====== ChatboxAIQA state machine ======
+    // State: null -> hỏi danh sách Topic
+    // State: awaiting_topic -> nhận topic (số/tên) => load QAs => hỏi danh sách QAs
+    // State: awaiting_question -> trả lời câu hỏi
+    const state = getState(userId);
+
+    // Nhận lệnh reset
+    if (/^(hủy|thoát|reset|bắt đầu|menu)$/i.test(text)) {
+      clearState(userId);
+    }
+
+    // 1) Chưa có state → render topics
+    if (!getState(userId)) {
+      const topics = await getTopics();
+      setState(userId, { stage: "awaiting_topic", topics });
+      const msg = renderTopicsMsg(topics);
+      await safeSendText(userId, withAutoPrefix(msg));
+      return res.status(200).send("ok");
+    }
+
+    // 2) Đang chọn Topic
+    if (state.stage === "awaiting_topic") {
+      const topics = state.topics || (await getTopics());
+      const picked = parsePick(text, topics, ["name"]);
+      if (!picked) {
+        const msg = "Mình chưa nhận ra chủ đề bạn chọn. Vui lòng gõ **số** hoặc **tên** chủ đề.";
+        await safeSendText(userId, withAutoPrefix(msg + "\n\n" + renderTopicsMsg(topics)));
+        return res.status(200).send("ok");
+      }
+      // load QAs
+      const qas = await getQAByTopic(picked.id);
+      setState(userId, { stage: "awaiting_question", topic: picked, qas });
+      const msg = renderQuestionsMsg(picked.name, qas);
+      await safeSendText(userId, withAutoPrefix(msg));
+      return res.status(200).send("ok");
+    }
+
+    // 3) Đang chọn Câu hỏi
+    if (state.stage === "awaiting_question") {
+      const qas = state.qas || [];
+      const pickedQ = parsePick(text, qas, ["question"]);
+      if (!pickedQ) {
+        const msg = "Mình chưa nhận ra câu hỏi bạn chọn. Gõ **số** câu hỏi hoặc trích nội dung.";
+        await safeSendText(userId, withAutoPrefix(msg + "\n\n" + renderQuestionsMsg(state.topic?.name || "", qas)));
+        return res.status(200).send("ok");
+      }
+      // Trả lời
+      const answer = pickedQ.answer || "Xin lỗi, câu trả lời chưa được cấu hình.";
+      await safeSendText(userId, withAutoPrefix(answer));
+
+      // Hỏi tiếp trong cùng topic
+      const follow = "Bạn muốn hỏi thêm trong chủ đề hiện tại không? Nếu có, gõ số câu hỏi tiếp theo.\nNếu muốn đổi chủ đề, gõ: **menu**";
+      await safeSendText(userId, withAutoPrefix(follow));
+      // Giữ state để user chọn câu khác, hoặc gõ "menu" để reset
+      return res.status(200).send("ok");
+    }
+
+    // ===== Fallbacks (nếu vì lý do gì state không khớp) =====
+    // company info nhanh
     let reply = tryCompanyInfoAnswer(text);
-
-    // 2) KB API (giới thiệu/bảo hành/…)
     if (!reply) reply = tryKbAnswer(text);
-
-    // 3) fallback Gemini (nếu có KEY), nếu lỗi -> template chung
     if (!reply) {
       try {
         const sys = [
@@ -369,41 +422,27 @@ app.post("/webhook", async (req, res) => {
           companyInfo?.name ? `Tên công ty: ${companyInfo.name}` : "",
           companyInfo?.hotline ? `Hotline: ${companyInfo.hotline}` : "",
           companyInfo?.email ? `Email: ${companyInfo.email}` : "",
-        ]
-          .filter(Boolean)
-          .join("\n");
+        ].filter(Boolean).join("\n");
         reply = await generateReply([], text, { system: sys });
       } catch (e) {
         console.error("[Gemini] error:", e.message || e);
-        reply =
-          "Xin lỗi, hiện mình chưa có thông tin đó. Bạn có thể hỏi về *tên công ty, địa chỉ, giờ làm, liên hệ, chính sách bảo hành…*";
+        reply = "Xin lỗi, hiện mình chưa có thông tin đó.";
       }
     }
-
-    // Thêm prefix tự động trước khi gửi
-    const finalMsg = withAutoPrefix(reply);
-    const resp = await safeSendText(userId, finalMsg);
-    console.log("[WEBHOOK] sendText resp:", resp);
-    res.status(200).send("ok");
+    await safeSendText(userId, withAutoPrefix(reply));
+    return res.status(200).send("ok");
   } catch (e) {
     console.error("[WEBHOOK] error:", e);
     res.status(200).send("ok");
   }
 });
 
-// ----------------- Broadcast (cron + debug) -----------------
-const CRON_EXPR = process.env.BROADCAST_CRON || "0 * * * *"; // mặc định mỗi giờ
-const CRON_TZ = process.env.BROADCAST_TZ || "Asia/Ho_Chi_Minh";
+// ----------------- Broadcast (cron) -----------------
+const CRON_EXPR = process.env.BROADCAST_CRON || "0 * * * *";
+const CRON_TZ   = process.env.BROADCAST_TZ || "Asia/Ho_Chi_Minh";
 
-// 24 thông điệp – có thể override bằng env BROADCAST_TEXTS (JSON array)
 const HOURLY_TEXTS = (process.env.BROADCAST_TEXTS &&
-  (() => {
-    try {
-      return JSON.parse(process.env.BROADCAST_TEXTS);
-    } catch {
-      return null;
-    }
-  })()) || [
+  (() => { try { return JSON.parse(process.env.BROADCAST_TEXTS); } catch { return null; } })()) || [
   "⏰ 00:00 – Chúc bạn một đêm ngon giấc! Có gì cần hỗ trợ, cứ nhắn cho Công Ty JW Kim nhé.",
   "⏰ 01:00 – Cảm ơn bạn đã theo dõi Công Ty JW Kim. Chúc bạn ngủ ngon!",
   "⏰ 02:00 – Đội ngũ trực hệ thống 24/7. Cần gì bạn cứ nhắn tin.",
@@ -453,23 +492,33 @@ async function broadcastOnce(text) {
   });
   if (!accessToken) return { total: list.length, sent: 0, failed: list.length };
 
-  const payload = withAutoPrefix(text); // thêm prefix cho broadcast
-  let sent = 0,
-    failed = 0;
+  const payload = withAutoPrefix(text);
+  let sent = 0, failed = 0;
   for (const uid of list) {
     try {
       const r = await sendText(accessToken, uid, payload);
-      if (r?.error === 0) sent++;
-      else failed++;
+      if (r?.error === 0) sent++; else failed++;
       await new Promise((r) => setTimeout(r, 120));
-    } catch {
-      failed++;
-    }
+    } catch { failed++; }
   }
-  console.log(
-    `[BROADCAST] Done. total=${list.length}, sent=${sent}, failed=${failed}`
-  );
+  console.log(`[BROADCAST] Done. total=${list.length}, sent=${sent}, failed=${failed}`);
   return { total: list.length, sent, failed };
+}
+
+async function pickScheduleTextForNow() {
+  try {
+    const hhmm = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: CRON_TZ || "Asia/Ho_Chi_Minh" });
+    const list = await getSchedules(); // [{sendTime:"HH:mm", message:"..."}]
+    const hits = list.filter(x => x.sendTime === hhmm);
+    if (hits.length) {
+      // nếu nhiều thì ghép lại
+      return hits.map(x => x.message).join("\n\n");
+    }
+    return null;
+  } catch (e) {
+    console.warn("[SCHEDULE] fetch error:", e.message);
+    return null;
+  }
 }
 
 try {
@@ -477,12 +526,10 @@ try {
   cron.schedule(
     CRON_EXPR,
     async () => {
+      const scheduleText = await pickScheduleTextForNow();
       const idx = hourIndex();
-      const text =
-        (Array.isArray(HOURLY_TEXTS) && HOURLY_TEXTS[idx]) ||
-        process.env.BROADCAST_TEXT ||
-        "🔔 Thông báo từ OA.";
-      await broadcastOnce(text);
+      const fallback = (Array.isArray(HOURLY_TEXTS) && HOURLY_TEXTS[idx]) || process.env.BROADCAST_TEXT || "🔔 Thông báo từ OA.";
+      await broadcastOnce(scheduleText || fallback);
     },
     { timezone: CRON_TZ }
   );
@@ -490,7 +537,7 @@ try {
   console.warn("[CRON] cannot schedule:", e.message);
 }
 
-// ----------------- Debug routes -----------------
+// ----------------- Debug routes giữ nguyên -----------------
 app.get("/debug/subscribers", async (req, res) => {
   try {
     const key = process.env.ADMIN_KEY || process.env.DEBUG_TOKEN;
@@ -510,13 +557,8 @@ app.post("/debug/broadcast", async (req, res) => {
     if (key && (req.query.key || req.headers["x-admin-key"]) !== key)
       return res.status(401).json({ error: "unauthorized" });
 
-    const text =
-      (
-        req.body?.text ||
-        req.query.text ||
-        process.env.BROADCAST_TEXT
-      )?.toString() || "🔔 Thông báo từ OA.";
-    const result = await broadcastOnce(text); // đã tự thêm prefix bên trong
+    const text = (req.body?.text || req.query.text || process.env.BROADCAST_TEXT)?.toString() || "🔔 Thông báo từ OA.";
+    const result = await broadcastOnce(text);
     res.json({ text: withAutoPrefix(text), ...result });
   } catch (e) {
     res.status(500).json({ error: e.message });
@@ -525,8 +567,5 @@ app.post("/debug/broadcast", async (req, res) => {
 
 // ----------------- Start -----------------
 const port = process.env.PORT || 3000;
-console.log(
-  "Gemini key prefix:",
-  (process.env.GOOGLE_API_KEY || "").slice(0, 4)
-);
+console.log("Gemini key prefix:", (process.env.GOOGLE_API_KEY || "").slice(0, 4));
 app.listen(port, () => console.log(`✅ Server listening on port ${port}`));
