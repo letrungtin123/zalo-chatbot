@@ -129,7 +129,9 @@ class KnowledgeBase {
     this.docs = [];
     this.last = 0;
   }
-  get stale() { return Date.now() - this.last > INTRO_TTL; }
+  get stale() {
+    return Date.now() - this.last > INTRO_TTL;
+  }
   async refresh(force = false) {
     if (!INTRO_BASE) return;
     if (!force && !this.stale && this.docs.length) return;
@@ -154,7 +156,9 @@ class KnowledgeBase {
       console.warn("[KB] refresh error:", e.message || e);
     }
   }
-  list() { return this.docs.slice(); }
+  list() {
+    return this.docs.slice();
+  }
 }
 const KB = new KnowledgeBase();
 KB.refresh(true).then(() => console.log("[KB] loaded"));
@@ -207,9 +211,15 @@ function tryCompanyInfoAnswer(userText) {
     return `⏰ Giờ làm việc: ${companyInfo.working_hours || "chưa thiết lập"}`;
   }
   if (/(liên hệ|hotline|số điện thoại|contact)/.test(t)) {
-    const hotline = companyInfo.hotline ? `Hotline: ${companyInfo.hotline}` : "";
-    const email   = companyInfo.email   ? (hotline ? " • " : "") + `Email: ${companyInfo.email}` : "";
-    return `📞 ${hotline}${email}` || "📞 Thông tin liên hệ hiện chưa thiết lập.";
+    const hotline = companyInfo.hotline
+      ? `Hotline: ${companyInfo.hotline}`
+      : "";
+    const email = companyInfo.email
+      ? (hotline ? " • " : "") + `Email: ${companyInfo.email}`
+      : "";
+    return (
+      `📞 ${hotline}${email}` || "📞 Thông tin liên hệ hiện chưa thiết lập."
+    );
   }
   return null;
 }
@@ -223,7 +233,8 @@ function tryKbAnswer(userText) {
     const q = norm(mDetail[1]);
     const doc =
       docs.find((d) => norm(d.title).includes(q)) ||
-      docs.find((d) => (d.text || "").toLowerCase().includes(q)) || null;
+      docs.find((d) => (d.text || "").toLowerCase().includes(q)) ||
+      null;
     if (doc) {
       const long = summarize(doc.text || "", 1600);
       return `📘 ${doc.title}\n\n${long}`;
@@ -292,13 +303,7 @@ function isThanksOrOk(userText = "") {
 function renderTopicsMsg(topics) {
   if (!topics?.length) return "Hiện chưa có chủ đề nào.";
   const lines = topics.map((t, i) => `${i + 1}. ${t.name}`);
-  return [
-    "Vui lòng chọn **Chủ đề**:",
-    "",
-    ...lines,
-    "",
-    "Hãy gõ tên chủ đề trực tiếp 💞"
-  ].join("\n");
+  return ["", ...lines, "", "Vui lòng Gõ số hoặc tên nhé 💞"].join("\n");
 }
 
 function renderQuestionsMsg(topicName, qas) {
@@ -308,7 +313,7 @@ function renderQuestionsMsg(topicName, qas) {
     `Chủ đề: **${topicName}**`,
     "Chọn **Câu hỏi** (gõ số hoặc trích nội dung):",
     "",
-    ...lines
+    ...lines,
   ].join("\n");
 }
 
@@ -320,12 +325,18 @@ function parsePick(text, list, fields = ["name", "question"]) {
   }
   // hoặc theo tên/string match 1 phần
   const t = norm(text || "");
-  let best = null, bestScore = 0;
+  let best = null,
+    bestScore = 0;
   for (const it of list) {
-    const hay = fields.map(f => norm(String(it[f] || ""))).join(" ");
+    const hay = fields.map((f) => norm(String(it[f] || ""))).join(" ");
     let score = 0;
-    t.split(/\s+/).forEach(tok => { if (tok && hay.includes(tok)) score++; });
-    if (score > bestScore) { best = it; bestScore = score; }
+    t.split(/\s+/).forEach((tok) => {
+      if (tok && hay.includes(tok)) score++;
+    });
+    if (score > bestScore) {
+      best = it;
+      bestScore = score;
+    }
   }
   return bestScore > 0 ? best : null;
 }
@@ -337,9 +348,15 @@ app.post("/webhook", async (req, res) => {
 
     const event = req.body || {};
     const { userId, text, event_name } = extractIncoming(event);
-    console.log("[WEBHOOK] incoming:", JSON.stringify({ event_name, userId, text }));
+    console.log(
+      "[WEBHOOK] incoming:",
+      JSON.stringify({ event_name, userId, text })
+    );
 
-    if (userId && (event_name === "user_follow" || event_name === "user_send_text")) {
+    if (
+      userId &&
+      (event_name === "user_follow" || event_name === "user_send_text")
+    ) {
       await addSubscriber(userId);
     }
     if (event_name !== "user_send_text") {
@@ -349,7 +366,8 @@ app.post("/webhook", async (req, res) => {
 
     // 0) “ok / cảm ơn”
     if (isThanksOrOk(text)) {
-      const ack = "Cảm ơn bạn đã quan tâm, theo dõi và sử dụng dịch vụ của công ty JW Kim 💞";
+      const ack =
+        "Cảm ơn bạn đã quan tâm, theo dõi và sử dụng dịch vụ của công ty JW Kim 💞";
       await safeSendText(userId, withAutoPrefix(ack));
       return res.status(200).send("ok");
     }
@@ -379,8 +397,12 @@ app.post("/webhook", async (req, res) => {
       const topics = state.topics || (await getTopics());
       const picked = parsePick(text, topics, ["name"]);
       if (!picked) {
-        const msg = "Mình chưa nhận ra chủ đề bạn chọn. Vui lòng gõ **số** hoặc **tên** chủ đề.";
-        await safeSendText(userId, withAutoPrefix(msg + "\n\n" + renderTopicsMsg(topics)));
+        const msg =
+          "Mình chưa nhận ra chủ đề bạn chọn. Vui lòng gõ **số** hoặc **tên** chủ đề.";
+        await safeSendText(
+          userId,
+          withAutoPrefix(msg + "\n\n" + renderTopicsMsg(topics))
+        );
         return res.status(200).send("ok");
       }
       // load QAs
@@ -396,16 +418,24 @@ app.post("/webhook", async (req, res) => {
       const qas = state.qas || [];
       const pickedQ = parsePick(text, qas, ["question"]);
       if (!pickedQ) {
-        const msg = "Mình chưa nhận ra câu hỏi bạn chọn. Gõ **số** câu hỏi hoặc trích nội dung.";
-        await safeSendText(userId, withAutoPrefix(msg + "\n\n" + renderQuestionsMsg(state.topic?.name || "", qas)));
+        const msg =
+          "Mình chưa nhận ra câu hỏi bạn chọn. Gõ **số** câu hỏi hoặc trích nội dung.";
+        await safeSendText(
+          userId,
+          withAutoPrefix(
+            msg + "\n\n" + renderQuestionsMsg(state.topic?.name || "", qas)
+          )
+        );
         return res.status(200).send("ok");
       }
       // Trả lời
-      const answer = pickedQ.answer || "Xin lỗi, câu trả lời chưa được cấu hình.";
+      const answer =
+        pickedQ.answer || "Xin lỗi, câu trả lời chưa được cấu hình.";
       await safeSendText(userId, withAutoPrefix(answer));
 
       // Hỏi tiếp trong cùng topic
-      const follow = "Bạn muốn hỏi thêm trong chủ đề hiện tại không? Nếu có, gõ số câu hỏi tiếp theo.\nNếu muốn đổi chủ đề, gõ: **menu**";
+      const follow =
+        "Bạn muốn hỏi thêm trong chủ đề hiện tại không? Nếu có, gõ số câu hỏi tiếp theo.\nNếu muốn đổi chủ đề, gõ: **menu**";
       await safeSendText(userId, withAutoPrefix(follow));
       // Giữ state để user chọn câu khác, hoặc gõ "menu" để reset
       return res.status(200).send("ok");
@@ -422,7 +452,9 @@ app.post("/webhook", async (req, res) => {
           companyInfo?.name ? `Tên công ty: ${companyInfo.name}` : "",
           companyInfo?.hotline ? `Hotline: ${companyInfo.hotline}` : "",
           companyInfo?.email ? `Email: ${companyInfo.email}` : "",
-        ].filter(Boolean).join("\n");
+        ]
+          .filter(Boolean)
+          .join("\n");
         reply = await generateReply([], text, { system: sys });
       } catch (e) {
         console.error("[Gemini] error:", e.message || e);
@@ -439,10 +471,16 @@ app.post("/webhook", async (req, res) => {
 
 // ----------------- Broadcast (cron) -----------------
 const CRON_EXPR = process.env.BROADCAST_CRON || "0 * * * *";
-const CRON_TZ   = process.env.BROADCAST_TZ || "Asia/Ho_Chi_Minh";
+const CRON_TZ = process.env.BROADCAST_TZ || "Asia/Ho_Chi_Minh";
 
 const HOURLY_TEXTS = (process.env.BROADCAST_TEXTS &&
-  (() => { try { return JSON.parse(process.env.BROADCAST_TEXTS); } catch { return null; } })()) || [
+  (() => {
+    try {
+      return JSON.parse(process.env.BROADCAST_TEXTS);
+    } catch {
+      return null;
+    }
+  })()) || [
   "⏰ 00:00 – Chúc bạn một đêm ngon giấc! Có gì cần hỗ trợ, cứ nhắn cho Công Ty JW Kim nhé.",
   "⏰ 01:00 – Cảm ơn bạn đã theo dõi Công Ty JW Kim. Chúc bạn ngủ ngon!",
   "⏰ 02:00 – Đội ngũ trực hệ thống 24/7. Cần gì bạn cứ nhắn tin.",
@@ -493,26 +531,37 @@ async function broadcastOnce(text) {
   if (!accessToken) return { total: list.length, sent: 0, failed: list.length };
 
   const payload = withAutoPrefix(text);
-  let sent = 0, failed = 0;
+  let sent = 0,
+    failed = 0;
   for (const uid of list) {
     try {
       const r = await sendText(accessToken, uid, payload);
-      if (r?.error === 0) sent++; else failed++;
+      if (r?.error === 0) sent++;
+      else failed++;
       await new Promise((r) => setTimeout(r, 120));
-    } catch { failed++; }
+    } catch {
+      failed++;
+    }
   }
-  console.log(`[BROADCAST] Done. total=${list.length}, sent=${sent}, failed=${failed}`);
+  console.log(
+    `[BROADCAST] Done. total=${list.length}, sent=${sent}, failed=${failed}`
+  );
   return { total: list.length, sent, failed };
 }
 
 async function pickScheduleTextForNow() {
   try {
-    const hhmm = new Date().toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: CRON_TZ || "Asia/Ho_Chi_Minh" });
+    const hhmm = new Date().toLocaleTimeString("en-GB", {
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+      timeZone: CRON_TZ || "Asia/Ho_Chi_Minh",
+    });
     const list = await getSchedules(); // [{sendTime:"HH:mm", message:"..."}]
-    const hits = list.filter(x => x.sendTime === hhmm);
+    const hits = list.filter((x) => x.sendTime === hhmm);
     if (hits.length) {
       // nếu nhiều thì ghép lại
-      return hits.map(x => x.message).join("\n\n");
+      return hits.map((x) => x.message).join("\n\n");
     }
     return null;
   } catch (e) {
@@ -528,7 +577,10 @@ try {
     async () => {
       const scheduleText = await pickScheduleTextForNow();
       const idx = hourIndex();
-      const fallback = (Array.isArray(HOURLY_TEXTS) && HOURLY_TEXTS[idx]) || process.env.BROADCAST_TEXT || "🔔 Thông báo từ OA.";
+      const fallback =
+        (Array.isArray(HOURLY_TEXTS) && HOURLY_TEXTS[idx]) ||
+        process.env.BROADCAST_TEXT ||
+        "🔔 Thông báo từ OA.";
       await broadcastOnce(scheduleText || fallback);
     },
     { timezone: CRON_TZ }
@@ -557,7 +609,12 @@ app.post("/debug/broadcast", async (req, res) => {
     if (key && (req.query.key || req.headers["x-admin-key"]) !== key)
       return res.status(401).json({ error: "unauthorized" });
 
-    const text = (req.body?.text || req.query.text || process.env.BROADCAST_TEXT)?.toString() || "🔔 Thông báo từ OA.";
+    const text =
+      (
+        req.body?.text ||
+        req.query.text ||
+        process.env.BROADCAST_TEXT
+      )?.toString() || "🔔 Thông báo từ OA.";
     const result = await broadcastOnce(text);
     res.json({ text: withAutoPrefix(text), ...result });
   } catch (e) {
@@ -567,5 +624,8 @@ app.post("/debug/broadcast", async (req, res) => {
 
 // ----------------- Start -----------------
 const port = process.env.PORT || 3000;
-console.log("Gemini key prefix:", (process.env.GOOGLE_API_KEY || "").slice(0, 4));
+console.log(
+  "Gemini key prefix:",
+  (process.env.GOOGLE_API_KEY || "").slice(0, 4)
+);
 app.listen(port, () => console.log(`✅ Server listening on port ${port}`));
