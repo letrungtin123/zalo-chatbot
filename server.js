@@ -303,7 +303,7 @@ function isThanksOrOk(userText = "") {
 function renderTopicsMsg(topics) {
   if (!topics?.length) return "Hiện chưa có chủ đề nào.";
   const lines = topics.map((t, i) => `${i + 1}. ${t.name}`);
-  return ["", ...lines, "", "Vui lòng Gõ số hoặc tên nhé 💞"].join("\n");
+  return ["", ...lines, "", "(Vui lòng Gõ số hoặc tên nhé)💞"].join("\n");
 }
 
 function renderQuestionsMsg(topicName, qas) {
